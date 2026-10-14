@@ -11,6 +11,7 @@ import (
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank/eastbank"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank/northbank"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank/westbank"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/config"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/httpapi"
 )
@@ -19,6 +20,7 @@ import (
 var adapters = map[string]func(baseURL string, c *http.Client) bank.Bank{
 	eastbank.Code:  func(u string, c *http.Client) bank.Bank { return eastbank.New(u, c) },
 	northbank.Code: func(u string, c *http.Client) bank.Bank { return northbank.New(u, c) },
+	westbank.Code:  func(u string, c *http.Client) bank.Bank { return westbank.New(u, c) },
 }
 
 // bankCodes — коды банков с адаптерами, по алфавиту.

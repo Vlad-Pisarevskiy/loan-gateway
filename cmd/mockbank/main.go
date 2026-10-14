@@ -50,14 +50,25 @@ func run() error {
 	return srv.Shutdown(shutdownCtx)
 }
 
-// newHandler выбирает диалект заглушки. ctx и log понадобятся асинхронному диалекту west.
-func newHandler(_ context.Context, cfg config.Mockbank, _ *slog.Logger) (http.Handler, error) {
+// newHandler выбирает диалект заглушки. ctx ограничивает фоновую отправку вебхуков диалекта west.
+func newHandler(ctx context.Context, cfg config.Mockbank, log *slog.Logger) (http.Handler, error) {
 	opts := mockbank.Options{Latency: cfg.Latency, FailFirst: cfg.FailFirst}
 	switch cfg.Dialect {
 	case "north":
 		return mockbank.NewNorth(opts), nil
 	case "east":
 		return mockbank.NewEast(opts), nil
+	case "west":
+		return mockbank.NewWest(ctx, opts, mockbank.CallbackOptions{
+			URL:           cfg.CallbackURL,
+			Secret:        []byte(cfg.CallbackSecret),
+			Delay:         cfg.CallbackDelay,
+			Skip:          cfg.CallbackSkip,
+			Retries:       3,
+			RetryInterval: 2 * time.Second,
+			Client:        &http.Client{Timeout: 5 * time.Second},
+			Log:           log,
+		}), nil
 	default:
 		return nil, fmt.Errorf("dialect %q is not implemented", cfg.Dialect)
 	}
