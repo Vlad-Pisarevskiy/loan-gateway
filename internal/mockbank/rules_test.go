@@ -83,39 +83,64 @@ func TestDecideRejections(t *testing.T) {
 	}
 }
 
-// TestDecideBoundaries закрепляет границы правил раздела 6.4 для каждого профиля:
-// возраст — включительный диапазон, нагрузка — отказ, только если платёж строго больше половины дохода.
+// TestDecideBoundaries закрепляет таблицу раздела 6.4 для каждого банка. Пороги взяты из спеки,
+// а не из профилей, поэтому тест ловит и неверное число, и неверное сравнение: возраст — включительный
+// диапазон, нагрузка — отказ, только если платёж строго больше половины дохода.
 func TestDecideBoundaries(t *testing.T) {
 	bornAgo := func(years, days int) time.Time {
 		return time.Date(testNow.Year()-years, testNow.Month(), testNow.Day()+days, 0, 0, 0, 0, time.UTC)
 	}
-	for name, p := range map[string]Profile{"north": NorthProfile, "east": EastProfile, "west": WestProfile} {
-		payment := Annuity(100_000_000, p.RateBPS, 24)
+	banks := []struct {
+		name           string
+		profile        Profile
+		minAge, maxAge int
+		pensioner      string // код отказа для пенсионера; пусто — принимается
+		minIncome      int64  // копейки
+		maxAmount      int64  // копейки
+		rateBPS        int
+	}{
+		{"north", NorthProfile, 21, 70, "", 3_000_000, 300_000_000, 1590},
+		{"east", EastProfile, 18, 65, "employment_not_accepted", 5_000_000, 500_000_000, 1490},
+		{"west", WestProfile, 18, 75, "", 2_500_000, 200_000_000, 1890},
+	}
+	for _, b := range banks {
+		payment := Annuity(100_000_000, b.rateBPS, 24)
+		incomeFirst := "insufficient_income" // пенсионер с доходом ниже минимума
+		if b.pensioner != "" {
+			incomeFirst = b.pensioner
+		}
 		tests := []struct {
 			name string
 			edit func(*LoanRequest)
 			want string // пусто — одобрение
 		}{
-			{"turns MinAge today", func(r *LoanRequest) { r.BirthDate = bornAgo(p.MinAge, 0) }, ""},
-			{"turns MinAge tomorrow", func(r *LoanRequest) { r.BirthDate = bornAgo(p.MinAge, 1) }, "age_out_of_range"},
-			{"turns MaxAge+1 tomorrow", func(r *LoanRequest) { r.BirthDate = bornAgo(p.MaxAge+1, 1) }, ""},
-			{"turns MaxAge+1 today", func(r *LoanRequest) { r.BirthDate = bornAgo(p.MaxAge+1, 0) }, "age_out_of_range"},
-			{"income at minimum", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = p.MinIncome, 3_000_000 }, ""},
-			{"income below minimum", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = p.MinIncome-1, 3_000_000 }, "insufficient_income"},
-			{"amount at limit", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = 1_000_000_000, p.MaxAmount }, ""},
-			{"amount above limit", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = 1_000_000_000, p.MaxAmount+1 }, "amount_exceeds_limit"},
+			{"turns min age today", func(r *LoanRequest) { r.BirthDate = bornAgo(b.minAge, 0) }, ""},
+			{"turns min age tomorrow", func(r *LoanRequest) { r.BirthDate = bornAgo(b.minAge, 1) }, "age_out_of_range"},
+			{"turns max age + 1 tomorrow", func(r *LoanRequest) { r.BirthDate = bornAgo(b.maxAge+1, 1) }, ""},
+			{"turns max age + 1 today", func(r *LoanRequest) { r.BirthDate = bornAgo(b.maxAge+1, 0) }, "age_out_of_range"},
+			{"pensioner", func(r *LoanRequest) { r.Employment = application.EmploymentPensioner }, b.pensioner},
+			{"income at minimum", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = b.minIncome, 3_000_000 }, ""},
+			{"income below minimum", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = b.minIncome-1, 3_000_000 }, "insufficient_income"},
+			{"amount at limit", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = 1_000_000_000, b.maxAmount }, ""},
+			{"amount above limit", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = 1_000_000_000, b.maxAmount+1 }, "amount_exceeds_limit"},
 			{"payment exactly half of income", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = 2*payment, 100_000_000 }, ""},
 			{"payment above half of income", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = 2*payment-1, 100_000_000 }, "debt_burden"},
-			{"income is checked before amount", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = p.MinIncome-1, p.MaxAmount+1 }, "insufficient_income"},
-			{"amount is checked before debt burden", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = p.MinIncome, p.MaxAmount+1 }, "amount_exceeds_limit"},
+			{"employment is checked before income", func(r *LoanRequest) {
+				r.Employment, r.MonthlyIncome, r.Amount = application.EmploymentPensioner, b.minIncome-1, 3_000_000
+			}, incomeFirst},
+			{"income is checked before amount", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = b.minIncome-1, b.maxAmount+1 }, "insufficient_income"},
+			{"amount is checked before debt burden", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = b.minIncome, b.maxAmount+1 }, "amount_exceeds_limit"},
 		}
 		for _, tt := range tests {
-			t.Run(name+": "+tt.name, func(t *testing.T) {
+			t.Run(b.name+": "+tt.name, func(t *testing.T) {
 				req := sampleRequest()
 				tt.edit(&req)
-				got := p.Decide(req, testNow)
+				got := b.profile.Decide(req, testNow)
 				if got.Approved != (tt.want == "") || got.RejectReason != tt.want {
 					t.Fatalf("got %+v, want reject reason %q (empty means approval)", got, tt.want)
+				}
+				if got.Approved && got.RateBPS != b.rateBPS {
+					t.Fatalf("rate = %d bps, want %d", got.RateBPS, b.rateBPS)
 				}
 			})
 		}
