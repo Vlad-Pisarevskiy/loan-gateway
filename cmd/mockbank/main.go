@@ -56,6 +56,8 @@ func newHandler(ctx context.Context, cfg config.Mockbank, log *slog.Logger) (htt
 	switch cfg.Dialect {
 	case "north":
 		return mockbank.NewNorth(opts), nil
+	case "east":
+		return mockbank.NewEast(opts), nil
 	case "west":
 		return mockbank.NewWest(ctx, opts, mockbank.CallbackOptions{
 			URL:           cfg.CallbackURL,
