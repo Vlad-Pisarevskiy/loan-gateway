@@ -131,6 +131,37 @@ func TestWestRetriesCallbackUntilAccepted(t *testing.T) {
 	}
 }
 
+func TestWestStopsAfterRetriesExhausted(t *testing.T) {
+	s := http.StatusServiceUnavailable
+	rc := &receiver{statuses: []int{s, s, s, s, s}}
+	srv := httptest.NewServer(rc)
+	defer srv.Close()
+
+	applyWest(t, newTestWest(t, srv.URL, false), "k-1", westSample)
+	waitFor(t, "4 deliveries", func() bool { return len(rc.received()) == 4 })
+	time.Sleep(50 * time.Millisecond)
+	if n := len(rc.received()); n != 4 {
+		t.Fatalf("deliveries = %d, want 4 — first attempt and 3 retries", n)
+	}
+}
+
+func TestWestStopsDeliveryOnCancel(t *testing.T) {
+	rc := &receiver{}
+	srv := httptest.NewServer(rc)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	h := NewWest(ctx, Options{Now: func() time.Time { return testNow }}, CallbackOptions{
+		URL: srv.URL, Secret: westSecret, Delay: 50 * time.Millisecond, Retries: 3, RetryInterval: 10 * time.Millisecond,
+	})
+	applyWest(t, h, "k-1", westSample)
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+	if n := len(rc.received()); n != 0 {
+		t.Fatalf("deliveries = %d, want 0 after cancel", n)
+	}
+}
+
 func TestWestRepeatSchedulesOneCallback(t *testing.T) {
 	rc := &receiver{}
 	srv := httptest.NewServer(rc)

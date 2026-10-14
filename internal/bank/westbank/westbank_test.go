@@ -64,6 +64,8 @@ func TestSubmitErrorClasses(t *testing.T) {
 		permanent bool
 	}{
 		{"server error", http.StatusServiceUnavailable, `{}`, false},
+		{"rate limited", http.StatusTooManyRequests, `{}`, false},
+		{"bad request", http.StatusBadRequest, `{}`, true},
 		{"unexpected 200", http.StatusOK, `{"application_id":"w-1"}`, true},
 		{"malformed json", http.StatusAccepted, `not json`, true},
 		{"empty application id", http.StatusAccepted, `{}`, true},
