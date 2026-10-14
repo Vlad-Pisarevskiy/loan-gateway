@@ -32,7 +32,7 @@ func runAPI(ctx context.Context, cfg config.Gateway, log *slog.Logger) error {
 		WebhookMaxSkew: cfg.WebhookMaxSkew,
 		Log:            log,
 	})
-	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	srv := newAPIServer(cfg.HTTPAddr, handler)
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 	log.Info("api started", "addr", cfg.HTTPAddr, "banks", reg.Codes())
@@ -46,4 +46,16 @@ func runAPI(ctx context.Context, cfg config.Gateway, log *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// newAPIServer — HTTP-сервер API. Лимит тела ограничивает размер, но не время: без ReadTimeout
+// медленный клиент и простаивающее keep-alive-соединение держат горутину сколь угодно долго.
+func newAPIServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 }

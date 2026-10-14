@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,5 +71,24 @@ func TestBuildBanksRequiresWebhookSecretForAsyncBank(t *testing.T) {
 	_, hooks, err := buildBanks(cfg)
 	if err != nil || string(hooks["asyncbank"].Secret) != "s" {
 		t.Fatalf("hooks = %v, err = %v", hooks, err)
+	}
+}
+
+func TestBankClientDoesNotFollowRedirects(t *testing.T) {
+	var followed atomic.Bool
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed.Store(true) }))
+	defer elsewhere.Close()
+	srv := httptest.NewServer(http.RedirectHandler(elsewhere.URL, http.StatusTemporaryRedirect))
+	defer srv.Close()
+
+	status, _, err := bank.PostJSON(t.Context(), newBankClient(), srv.URL, nil, map[string]string{"name": "Иванов Иван"})
+	if err != nil {
+		t.Fatalf("PostJSON: %v", err)
+	}
+	if status != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want 307 returned as is", status)
+	}
+	if followed.Load() {
+		t.Fatal("client re-sent the request body to the redirect target")
 	}
 }

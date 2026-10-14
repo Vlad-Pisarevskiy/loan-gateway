@@ -30,7 +30,7 @@ func bankCodes() []string {
 
 // buildBanks собирает реестр включённых банков и настройки вебхуков асинхронных банков.
 func buildBanks(cfg config.Gateway) (*bank.Registry, map[string]httpapi.WebhookBank, error) {
-	client := &http.Client{}
+	client := newBankClient()
 	var banks []bank.Bank
 	hooks := map[string]httpapi.WebhookBank{}
 	for _, bc := range cfg.Banks {
@@ -53,6 +53,14 @@ func buildBanks(cfg config.Gateway) (*bank.Registry, map[string]httpapi.WebhookB
 		return nil, nil, err
 	}
 	return reg, hooks, nil
+}
+
+// newBankClient — HTTP-клиент к банкам. Редиректы не выполняются: на 307 и 308 клиент повторил бы
+// POST с ПДн по адресу из Location. Ответ 3xx остаётся ответом банка — постоянной ошибкой (раздел 6.2).
+func newBankClient() *http.Client {
+	return &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 // bankTimeouts — таймауты вызова по коду банка.
