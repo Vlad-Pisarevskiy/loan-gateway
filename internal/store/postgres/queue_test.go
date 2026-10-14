@@ -328,3 +328,18 @@ func TestSweepFailsExpiredLeaseWithoutAttemptsLeft(t *testing.T) {
 		t.Fatalf("northbank = %+v, want failed with lease expired", b)
 	}
 }
+
+func TestCallbackBeforeExternalIDIsUnknown(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	q := postgres.NewQueue(pool)
+	app := seed(t, pool, "westbank")
+	claim(t, q, 1)
+
+	res, err := q.ApplyCallback(t.Context(), "westbank", "w-early", approved)
+	if err != nil || res != application.CallbackUnknown {
+		t.Fatalf("ApplyCallback = %d, %v, want unknown", res, err)
+	}
+	if s := result(t, pool, app.ID, "westbank").Status; s != application.RequestSending {
+		t.Fatalf("status = %s, want sending", s)
+	}
+}

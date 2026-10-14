@@ -139,30 +139,33 @@ func (q *Queue) Sweep(ctx context.Context, maxAttempts int) (dispatch.SweepStats
 }
 
 // ApplyCallback записывает решение из вебхука, если запрос ещё ждёт его.
+// Обновление и проверка существования — один SQL-оператор: оба видят один снимок данных.
+// Иначе вебхук, пришедший раньше сохранения external_id, мог бы получить Duplicate
+// вместо Unknown, и банк не повторил бы его.
 func (q *Queue) ApplyCallback(ctx context.Context, bankCode, externalID string, d application.Decision) (application.CallbackResult, error) {
-	const guard = ` WHERE bank_code = $1 AND external_id = $2 AND status = 'waiting_callback'`
-	query := `UPDATE bank_requests SET status = 'rejected', reject_reason = $3, updated_at = now()` + guard
+	const (
+		guard = ` WHERE bank_code = $1 AND external_id = $2 AND status = 'waiting_callback'`
+		tail  = ` RETURNING 1)
+		SELECT EXISTS (SELECT 1 FROM upd),
+		       EXISTS (SELECT 1 FROM bank_requests WHERE bank_code = $1 AND external_id = $2)`
+	)
+	query := `WITH upd AS (UPDATE bank_requests SET status = 'rejected', reject_reason = $3, updated_at = now()` + guard + tail
 	args := []any{bankCode, externalID, d.RejectReason}
 	if d.Approved {
-		query = `UPDATE bank_requests SET status = 'approved', approved_amount = $3, rate_bps = $4,
-			approved_term = $5, monthly_payment = $6, updated_at = now()` + guard
+		query = `WITH upd AS (UPDATE bank_requests SET status = 'approved', approved_amount = $3, rate_bps = $4,
+			approved_term = $5, monthly_payment = $6, updated_at = now()` + guard + tail
 		args = []any{bankCode, externalID, d.Amount, d.RateBPS, d.TermMonths, d.MonthlyPayment}
 	}
-	tag, err := q.pool.Exec(ctx, query, args...)
-	if err != nil {
+	var updated, exists bool
+	if err := q.pool.QueryRow(ctx, query, args...).Scan(&updated, &exists); err != nil {
 		return 0, fmt.Errorf("apply callback: %w", err)
 	}
-	if tag.RowsAffected() == 1 {
+	switch {
+	case updated:
 		return application.CallbackApplied, nil
-	}
-	var exists bool
-	err = q.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM bank_requests WHERE bank_code = $1 AND external_id = $2)`,
-		bankCode, externalID).Scan(&exists)
-	if err != nil {
-		return 0, fmt.Errorf("lookup callback request: %w", err)
-	}
-	if exists {
+	case exists:
 		return application.CallbackDuplicate, nil
+	default:
+		return application.CallbackUnknown, nil
 	}
-	return application.CallbackUnknown, nil
 }
