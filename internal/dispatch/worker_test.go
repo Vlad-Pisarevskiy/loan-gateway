@@ -30,7 +30,8 @@ type fakeQueue struct {
 	pending      []Task
 	claimErrs    int  // сколько первых вызовов Claim вернут ошибку
 	hangDB       bool // Claim и Sweep висят до отмены ctx, как запрос к зависшей БД
-	hangComplete bool // Complete висит до отмены ctx
+	hangComplete bool // Complete висит до отмены ctx или закрытия unblock
+	unblock      chan struct{}
 	limits       []int
 	completed    []completion
 	sweeps       int
@@ -56,7 +57,10 @@ func (q *fakeQueue) Claim(ctx context.Context, limit int, _ time.Duration) ([]Ta
 
 func (q *fakeQueue) Complete(ctx context.Context, t Task, o Outcome) (bool, error) {
 	if q.hangComplete {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-q.unblock:
+		}
 	}
 	if err := ctx.Err(); err != nil { // как pgx: с отменённым контекстом запрос не выполняется
 		return false, err
@@ -338,10 +342,11 @@ func TestRunSurvivesHangingDatabase(t *testing.T) {
 func TestRunDoesNotHangOnSavingResult(t *testing.T) {
 	cfg := testConfig()
 	cfg.DBTimeout = 20 * time.Millisecond
-	q := &fakeQueue{pending: []Task{newTask("northbank", 1)}, hangComplete: true}
+	q := &fakeQueue{pending: []Task{newTask("northbank", 1)}, hangComplete: true, unblock: make(chan struct{})}
 	w := newTestWorker(t, q, cfg, fakeBank{code: "northbank", submit: decide})
 	logs := captureLogs(w)
 	runWorker(t, w)
+	t.Cleanup(func() { close(q.unblock) }) // при регрессии остановка не должна висеть до -timeout
 	eventually(t, "save failure in log", func() bool {
 		return strings.Contains(logs.String(), "save bank result failed")
 	})
