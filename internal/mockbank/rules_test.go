@@ -82,3 +82,42 @@ func TestDecideRejections(t *testing.T) {
 		})
 	}
 }
+
+// TestDecideBoundaries закрепляет границы правил раздела 6.4 для каждого профиля:
+// возраст — включительный диапазон, нагрузка — отказ, только если платёж строго больше половины дохода.
+func TestDecideBoundaries(t *testing.T) {
+	bornAgo := func(years, days int) time.Time {
+		return time.Date(testNow.Year()-years, testNow.Month(), testNow.Day()+days, 0, 0, 0, 0, time.UTC)
+	}
+	for name, p := range map[string]Profile{"north": NorthProfile, "east": EastProfile, "west": WestProfile} {
+		payment := Annuity(100_000_000, p.RateBPS, 24)
+		tests := []struct {
+			name string
+			edit func(*LoanRequest)
+			want string // пусто — одобрение
+		}{
+			{"turns MinAge today", func(r *LoanRequest) { r.BirthDate = bornAgo(p.MinAge, 0) }, ""},
+			{"turns MinAge tomorrow", func(r *LoanRequest) { r.BirthDate = bornAgo(p.MinAge, 1) }, "age_out_of_range"},
+			{"turns MaxAge+1 tomorrow", func(r *LoanRequest) { r.BirthDate = bornAgo(p.MaxAge+1, 1) }, ""},
+			{"turns MaxAge+1 today", func(r *LoanRequest) { r.BirthDate = bornAgo(p.MaxAge+1, 0) }, "age_out_of_range"},
+			{"income at minimum", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = p.MinIncome, 3_000_000 }, ""},
+			{"income below minimum", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = p.MinIncome-1, 3_000_000 }, "insufficient_income"},
+			{"amount at limit", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = 1_000_000_000, p.MaxAmount }, ""},
+			{"amount above limit", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = 1_000_000_000, p.MaxAmount+1 }, "amount_exceeds_limit"},
+			{"payment exactly half of income", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = 2*payment, 100_000_000 }, ""},
+			{"payment above half of income", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = 2*payment-1, 100_000_000 }, "debt_burden"},
+			{"income is checked before amount", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = p.MinIncome-1, p.MaxAmount+1 }, "insufficient_income"},
+			{"amount is checked before debt burden", func(r *LoanRequest) { r.MonthlyIncome, r.Amount = p.MinIncome, p.MaxAmount+1 }, "amount_exceeds_limit"},
+		}
+		for _, tt := range tests {
+			t.Run(name+": "+tt.name, func(t *testing.T) {
+				req := sampleRequest()
+				tt.edit(&req)
+				got := p.Decide(req, testNow)
+				if got.Approved != (tt.want == "") || got.RejectReason != tt.want {
+					t.Fatalf("got %+v, want reject reason %q (empty means approval)", got, tt.want)
+				}
+			})
+		}
+	}
+}
