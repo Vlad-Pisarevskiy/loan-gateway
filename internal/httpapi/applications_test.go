@@ -84,12 +84,52 @@ func TestCreateApplicationRejectsBadRequests(t *testing.T) {
 }
 
 func TestCreateApplicationBodyTooLarge(t *testing.T) {
-	body := `{"full_name":"` + strings.Repeat("a", 1<<20) + `"}`
-	rec := do(newTestHandler(t, &fakeService{}), http.MethodPost, "/v1/applications", body, withKey("k"))
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("code = %d, want 413", rec.Code)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"huge field", `{"full_name":"` + strings.Repeat("a", 1<<20) + `"}`},
+		{"valid object with huge tail", validBody + strings.Repeat(" ", 1<<20)},
 	}
-	decodeProblem(t, rec)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := do(newTestHandler(t, &fakeService{}), http.MethodPost, "/v1/applications", tt.body, withKey("k"))
+			if rec.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("code = %d, want 413", rec.Code)
+			}
+			decodeProblem(t, rec)
+		})
+	}
+}
+
+func TestUnknownRoutesReturnProblem(t *testing.T) {
+	id := uuid.NewString()
+	tests := []struct {
+		method, path string
+		code         int
+		allow        string
+	}{
+		{http.MethodGet, "/v1/nope", http.StatusNotFound, ""},
+		{http.MethodGet, "/v1/applications/", http.StatusNotFound, ""},
+		{http.MethodPut, "/v1/applications", http.StatusMethodNotAllowed, "POST"},
+		{http.MethodDelete, "/v1/applications/" + id, http.StatusMethodNotAllowed, "GET, HEAD"},
+		{http.MethodGet, "/v1/webhooks/banks/westbank", http.StatusMethodNotAllowed, "POST"},
+		{http.MethodPost, "/healthz", http.StatusMethodNotAllowed, "GET, HEAD"},
+		{http.MethodPost, "/readyz", http.StatusMethodNotAllowed, "GET, HEAD"},
+	}
+	h := newTestHandler(t, &fakeService{})
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			rec := do(h, tt.method, tt.path, "", nil)
+			if rec.Code != tt.code {
+				t.Fatalf("code = %d, want %d", rec.Code, tt.code)
+			}
+			if got := rec.Header().Get("Allow"); got != tt.allow {
+				t.Fatalf("Allow = %q, want %q", got, tt.allow)
+			}
+			decodeProblem(t, rec)
+		})
+	}
 }
 
 func TestCreateApplicationServiceErrors(t *testing.T) {

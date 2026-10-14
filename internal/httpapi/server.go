@@ -62,5 +62,29 @@ func NewHandler(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/webhooks/banks/{code}", a.bankWebhook)
 	mux.HandleFunc("GET /healthz", a.healthz)
 	mux.HandleFunc("GET /readyz", a.readyz)
+
+	// Свои 404 и 405 у ServeMux — text/plain, а спека требует problem+json для всех ошибок.
+	// Шаблон без метода менее специфичен, чем с методом, поэтому ловит только чужие методы.
+	mux.HandleFunc("/", notFound)
+	for path, allow := range map[string]string{
+		"/v1/applications":          "POST",
+		"/v1/applications/{id}":     "GET, HEAD",
+		"/v1/webhooks/banks/{code}": "POST",
+		"/healthz":                  "GET, HEAD",
+		"/readyz":                   "GET, HEAD",
+	} {
+		mux.Handle(path, methodNotAllowed(allow))
+	}
 	return mux
+}
+
+func notFound(w http.ResponseWriter, _ *http.Request) {
+	writeProblem(w, http.StatusNotFound, "Not found", "resource not found")
+}
+
+func methodNotAllowed(allow string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Allow", allow)
+		writeProblem(w, http.StatusMethodNotAllowed, "Method not allowed", "allowed methods: "+allow)
+	}
 }

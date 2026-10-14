@@ -97,16 +97,24 @@ func decodeInput(w http.ResponseWriter, r *http.Request) (application.Input, int
 	dec.DisallowUnknownFields()
 	var in application.Input
 	if err := dec.Decode(&in); err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
+		if tooLarge(err) {
 			return in, http.StatusRequestEntityTooLarge, fmt.Errorf("body exceeds %d bytes", maxBodyBytes)
 		}
 		return in, http.StatusBadRequest, fmt.Errorf("malformed JSON: %w", err)
 	}
+	// Хвост после объекта тоже считается в лимит: тело больше лимита — 413 при любом содержимом.
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if tooLarge(err) {
+			return in, http.StatusRequestEntityTooLarge, fmt.Errorf("body exceeds %d bytes", maxBodyBytes)
+		}
 		return in, http.StatusBadRequest, errors.New("body must contain a single JSON object")
 	}
 	return in, 0, nil
+}
+
+func tooLarge(err error) bool {
+	var e *http.MaxBytesError
+	return errors.As(err, &e)
 }
 
 func validIdempotencyKey(k string) bool {
