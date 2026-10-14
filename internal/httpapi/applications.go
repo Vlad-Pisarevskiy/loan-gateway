@@ -93,23 +93,31 @@ func (a *api) getApplication(w http.ResponseWriter, r *http.Request) {
 // decodeInput читает тело: не больше maxBodyBytes, ровно один JSON-объект, без неизвестных полей.
 // Возвращает HTTP-статус для ошибки.
 func decodeInput(w http.ResponseWriter, r *http.Request) (application.Input, int, error) {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	body := http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	in, err := decodeObject(body)
+	if err == nil {
+		return in, 0, nil
+	}
+	// Ошибка разбора бывает раньше, чем исчерпан лимит: дочитываем тело, чтобы любое тело больше
+	// лимита давало 413, а не 400 (раздел 5.1 спеки). После превышения MaxBytesReader снова вернёт ту же ошибку.
+	if _, rest := io.Copy(io.Discard, body); tooLarge(rest) {
+		return in, http.StatusRequestEntityTooLarge, fmt.Errorf("body exceeds %d bytes", maxBodyBytes)
+	}
+	return in, http.StatusBadRequest, err
+}
+
+// decodeObject читает ровно один JSON-объект без неизвестных полей.
+func decodeObject(r io.Reader) (application.Input, error) {
+	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
 	var in application.Input
 	if err := dec.Decode(&in); err != nil {
-		if tooLarge(err) {
-			return in, http.StatusRequestEntityTooLarge, fmt.Errorf("body exceeds %d bytes", maxBodyBytes)
-		}
-		return in, http.StatusBadRequest, fmt.Errorf("malformed JSON: %w", err)
+		return in, fmt.Errorf("malformed JSON: %w", err)
 	}
-	// Хвост после объекта тоже считается в лимит: тело больше лимита — 413 при любом содержимом.
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		if tooLarge(err) {
-			return in, http.StatusRequestEntityTooLarge, fmt.Errorf("body exceeds %d bytes", maxBodyBytes)
-		}
-		return in, http.StatusBadRequest, errors.New("body must contain a single JSON object")
+		return in, errors.New("body must contain a single JSON object")
 	}
-	return in, 0, nil
+	return in, nil
 }
 
 func tooLarge(err error) bool {
