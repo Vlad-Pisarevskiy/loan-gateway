@@ -18,7 +18,7 @@ func TestStatusErrorClasses(t *testing.T) {
 			t.Errorf("status %d: want temporary error, got %v", code, err)
 		}
 	}
-	for _, code := range []int{400, 404, 409, 422} {
+	for _, code := range []int{301, 302, 307, 308, 400, 404, 409, 422} {
 		if err := StatusError(code); !IsPermanent(err) {
 			t.Errorf("status %d: want permanent error, got %v", code, err)
 		}

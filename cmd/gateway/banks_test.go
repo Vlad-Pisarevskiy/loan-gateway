@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/application"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/config"
@@ -74,21 +76,26 @@ func TestBuildBanksRequiresWebhookSecretForAsyncBank(t *testing.T) {
 	}
 }
 
-func TestBankClientDoesNotFollowRedirects(t *testing.T) {
+func TestBanksDoNotFollowRedirects(t *testing.T) {
 	var followed atomic.Bool
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed.Store(true) }))
 	defer elsewhere.Close()
 	srv := httptest.NewServer(http.RedirectHandler(elsewhere.URL, http.StatusTemporaryRedirect))
 	defer srv.Close()
 
-	status, _, err := bank.PostJSON(t.Context(), newBankClient(), srv.URL, nil, map[string]string{"name": "Иванов Иван"})
+	// Через реестр из buildBanks: проверяется клиент, который получают адаптеры.
+	reg, _, err := buildBanks(config.Gateway{Banks: []config.Bank{{Code: "northbank", URL: srv.URL}}})
 	if err != nil {
-		t.Fatalf("PostJSON: %v", err)
+		t.Fatal(err)
 	}
-	if status != http.StatusTemporaryRedirect {
-		t.Fatalf("status = %d, want 307 returned as is", status)
+	b, _ := reg.Get("northbank")
+	app := application.Application{ID: uuid.New(), FullName: "Иванов Иван", BirthDate: time.Date(1990, 5, 17, 0, 0, 0, 0, time.UTC),
+		Phone: "+79991234567", MonthlyIncome: 12_000_000, EmploymentType: application.EmploymentEmployed, Amount: 30_000_000, TermMonths: 24}
+	_, err = b.Submit(t.Context(), bank.SubmitRequest{RequestID: uuid.New(), Application: app})
+	if !bank.IsPermanent(err) {
+		t.Fatalf("redirect: err = %v, want permanent bank error", err)
 	}
 	if followed.Load() {
-		t.Fatal("client re-sent the request body to the redirect target")
+		t.Fatal("client re-sent the applicant's data to the redirect target")
 	}
 }
