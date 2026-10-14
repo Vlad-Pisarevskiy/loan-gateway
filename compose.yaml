@@ -7,6 +7,8 @@ x-gateway-env: &gateway-env
   DATABASE_URL: postgres://gateway:gateway@postgres:5432/gateway?sslmode=disable
   LOG_LEVEL: info
   BANK_NORTHBANK_URL: http://northbank:8090
+  BANK_WESTBANK_URL: http://westbank:8090
+  BANK_WESTBANK_WEBHOOK_SECRET: local-west-secret
 
 services:
   postgres:
@@ -52,3 +54,12 @@ services:
     command: ["mockbank"]
     environment:
       MOCKBANK_DIALECT: north
+
+  westbank:
+    <<: *app
+    command: ["mockbank"]
+    environment:
+      MOCKBANK_DIALECT: west
+      MOCKBANK_CALLBACK_URL: http://api:8080/v1/webhooks/banks/westbank
+      MOCKBANK_CALLBACK_SECRET: local-west-secret
+      MOCKBANK_CALLBACK_DELAY: 5s
