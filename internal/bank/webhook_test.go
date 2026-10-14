@@ -43,6 +43,10 @@ func TestVerifyWebhook(t *testing.T) {
 		{"missing signature", testSecret, ts, "", body, now, true},
 		{"missing timestamp", testSecret, "", sig, body, now, true},
 		{"bad timestamp", testSecret, "abc", sig, body, now, true},
+		{"millisecond timestamp", testSecret, "1760000000000", SignWebhook(testSecret, "1760000000000", body), body, now, true},
+		{"far future timestamp", testSecret, "99999999999", SignWebhook(testSecret, "99999999999", body), body, now, true},
+		{"max int64 timestamp", testSecret, "9223372036854775807", SignWebhook(testSecret, "9223372036854775807", body), body, now, true},
+		{"exactly at skew boundary", testSecret, ts, sig, body, now.Add(5 * time.Minute), false},
 		{"timestamp is part of signature", testSecret, "1760000001", sig, body, now, true},
 	}
 	for _, tt := range tests {

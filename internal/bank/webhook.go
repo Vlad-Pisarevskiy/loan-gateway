@@ -39,11 +39,11 @@ func VerifyWebhook(secret []byte, timestamp, signature string, body []byte, now 
 	if err != nil {
 		return fmt.Errorf("%w: bad timestamp", ErrBadSignature)
 	}
-	skew := now.Sub(time.Unix(sec, 0))
-	if skew < 0 {
-		skew = -skew
-	}
-	if skew > maxSkew {
+	// Сравниваем целые секунды: Duration переполняется для далёких timestamp
+	// (например, миллисекунд вместо секунд), и проверка окна пропустила бы запрос.
+	nowSec := now.Unix()
+	maxSec := int64(maxSkew / time.Second)
+	if sec < nowSec-maxSec || sec > nowSec+maxSec {
 		return fmt.Errorf("%w: timestamp outside allowed window", ErrBadSignature)
 	}
 	want := SignWebhook(secret, timestamp, body)
