@@ -51,6 +51,14 @@
   ```bash
   git push -u origin main develop
   ```
+- [ ] **Настроить облачное окружение** (нужно для этапа 2). На [claude.ai/code](https://claude.ai/code): кнопка с облаком и именем окружения над полем ввода → **Cloud** → навести на окружение → шестерёнка. В поле **Setup script**:
+  ```bash
+  #!/bin/bash
+  # Зеркало Docker Hub для демона: анонимные запросы с общего IP получают 429
+  mkdir -p /etc/docker
+  echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' > /etc/docker/daemon.json
+  ```
+  В поле **Environment variables**: `TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX=mirror.gcr.io/`. Setup-скрипт попадает в кеш окружения, а запущенные процессы — нет, поэтому сам Docker-демон в каждой сессии поднимает хук `SessionStart` из `.claude/settings.json`.
 
 ## Процесс выполнения задачи
 
@@ -64,15 +72,33 @@
 6. **Журнал:** строка в `docs/dev-log.md` (дата, задача, где, PR, замечания исправлено/всего, стоимость), коммит `docs: log task N`, push.
 7. **Merge:** CI зелёный → `gh pr merge --merge --delete-branch && git switch develop && git pull --ff-only`.
 
-Облачные задачи (этап 2) проходят шаги 1–6 в облачной сессии; merge делает человек после ревью.
+### Облачные сессии
+
+Облачные задачи (этап 2) проходят шаги 1–6 в облачной сессии; merge делает человек после ревью. Отличия от локального процесса:
+
+- **Docker.** Демон поднимает хук `SessionStart` (`.claude/hooks/cloud-docker.sh`). Если `docker info` не отвечает — запустить хук вручную с `CLAUDE_CODE_REMOTE=true` и смотреть `/tmp/dockerd.log`. Образы Docker Hub идут через зеркало `mirror.gcr.io` (см. «Перед началом»).
+- **Навыки.** Плагина superpowers в облаке нет: роль `developer` проходит шаги задачи напрямую, ревью — роль `reviewer`.
+- **PR (шаг 4).** `gh pr` и `gh issue` в облаке не работают: прокси GitHub отклоняет GraphQL. PR создаётся встроенными GitHub-инструментами сессии или через REST: `gh api repos/Vlad-Pisarevskiy/loan-gateway/pulls -f base=develop -f head=feature/<slug> -f title="<заголовок>" -f body="Task N из docs/plan.md"`.
+- **Журнал (шаг 6).** Где — `облако`, стоимость — `?`: её вписывает человек.
+- **Merge** не делать: `develop` и `main` защищены, PR мержит человек.
 
 ## Этапы
 
 | Этап | Задачи | Где |
 |---|---|---|
-| 1. Фундамент и northbank | Task 1–15 | локально, последовательно |
-| 2. eastbank и westbank | Task 16, Task 17 | облако, две параллельные сессии |
+| 1. Фундамент | Task 1–10, Task 12 | локально, последовательно; Task 12 выполнена досрочно, параллельно с Task 7 (PR #7) |
+| 2. northbank, сборка, eastbank и westbank | Task 11, Task 13–17 | облако, параллельно там, где позволяют зависимости |
 | 3. Релиз | Task 18 | локально |
+
+Облачная сессия задачи стартует от `develop`, поэтому запускать её — после merge задач, от которых она зависит:
+
+| Задача | Запускать после merge |
+|---|---|
+| Task 11 | Task 10 |
+| Task 13 | Task 11 и Task 12 |
+| Task 14 | Task 11; идёт параллельно с Task 13 и Task 15 |
+| Task 15 | Task 13 |
+| Task 16, Task 17 | Task 14 и Task 15; две параллельные сессии |
 
 ## Карта файлов
 
@@ -105,6 +131,7 @@ internal/mockbank/                правила решений, общая ме
 test/e2e/                         end-to-end тесты
 scripts/demo.sh                   демо через curl + jq
 Dockerfile, compose.yaml          образ и окружение
+.claude/hooks/cloud-docker.sh     запуск Docker-демона в облачных сессиях
 ```
 
 ---
@@ -5253,7 +5280,9 @@ git commit -m "feat(mockbank): add north dialect"
 
 ### Task 11: Адаптер northbank
 
-**Ветка:** `feature/northbank` · **Этап 1, локально** · **Спека:** разделы 6.1–6.3
+**Ветка:** `feature/northbank` · **Этап 2, облако, после merge Task 10** · **Спека:** разделы 6.1–6.3
+
+**Промпт для облачной сессии:** «Выполни Task 11 из docs/plan.md в ветке feature/northbank от develop. Следуй CLAUDE.md и подразделу „Облачные сессии“ плана. В конце — `make lint && make test`, строка в docs/dev-log.md и PR в develop.»
 
 **Files:**
 - Create: `internal/bank/northbank/northbank.go`
@@ -5998,7 +6027,9 @@ git commit -m "feat(config): load gateway and mockbank settings from env"
 
 ### Task 13: Бинарники gateway и mockbank
 
-**Ветка:** `feature/binaries` · **Этап 1, локально** · **Спека:** разделы 3, 8 (остановка), 9
+**Ветка:** `feature/binaries` · **Этап 2, облако, после merge Task 11 и Task 12** · **Спека:** разделы 3, 8 (остановка), 9
+
+**Промпт для облачной сессии:** «Выполни Task 13 из docs/plan.md в ветке feature/binaries от develop. Следуй CLAUDE.md и подразделу „Облачные сессии“ плана. В конце — `make lint && make test`, строка в docs/dev-log.md и PR в develop.»
 
 **Files:**
 - Modify: `cmd/gateway/main.go` (целиком, новая версия ниже)
@@ -6425,7 +6456,9 @@ git commit -m "feat(cmd): wire gateway api, worker, migrate and mockbank binarie
 
 ### Task 14: End-to-end тесты на northbank
 
-**Ветка:** `feature/e2e-northbank` · **Этап 1, локально** · **Спека:** раздел 11 (E2E)
+**Ветка:** `feature/e2e-northbank` · **Этап 2, облако, после merge Task 11, параллельно с Task 13 и Task 15** · **Спека:** раздел 11 (E2E)
+
+**Промпт для облачной сессии:** «Выполни Task 14 из docs/plan.md в ветке feature/e2e-northbank от develop. Следуй CLAUDE.md и подразделу „Облачные сессии“ плана. В конце — `make lint && make test`, строка в docs/dev-log.md и PR в develop.»
 
 **Files:**
 - Create: `test/e2e/harness_test.go`
@@ -6773,7 +6806,11 @@ git commit -m "test(e2e): cover northbank flow and idempotency end to end"
 
 ### Task 15: Docker-образ, docker compose и демо
 
-**Ветка:** `feature/compose-demo` · **Этап 1, локально** · **Спека:** раздел 12
+**Ветка:** `feature/compose-demo` · **Этап 2, облако, после merge Task 13** · **Спека:** раздел 12
+
+**Промпт для облачной сессии:** «Выполни Task 15 из docs/plan.md в ветке feature/compose-demo от develop. Следуй CLAUDE.md и подразделу „Облачные сессии“ плана. В конце — `make lint && make test`, строка в docs/dev-log.md и PR в develop.»
+
+Зеркало Docker Hub в демоне облака ещё не проверено на сборке образа и `docker compose`. Если `docker build` или `docker compose up` упирается в `429 Too Many Requests` — остановиться и сообщить: задачу доделают локально.
 
 **Files:**
 - Create: `Dockerfile`, `.dockerignore`, `compose.yaml`, `scripts/demo.sh`
@@ -6948,7 +6985,7 @@ git commit -m "feat: add docker image, compose environment and demo script"
 
 Задача независима от Task 17. Обе правят `cmd/gateway/banks.go`, `cmd/mockbank/main.go`, `cmd/mockbank/main_test.go` и `compose.yaml` — точечно, в разных строках; конфликт при merge второго PR решается объединением обеих правок.
 
-**Промпт для облачной сессии:** «Выполни Task 16 из docs/plan.md в ветке feature/eastbank от develop. Следуй CLAUDE.md. В конце — `make lint && make test`, строка в docs/dev-log.md и PR в develop.»
+**Промпт для облачной сессии:** «Выполни Task 16 из docs/plan.md в ветке feature/eastbank от develop. Следуй CLAUDE.md и подразделу „Облачные сессии“ плана. В конце — `make lint && make test`, строка в docs/dev-log.md и PR в develop.»
 
 **Files:**
 - Create: `internal/mockbank/east.go`, `internal/bank/eastbank/eastbank.go`
@@ -7493,7 +7530,7 @@ git commit -m "feat: connect eastbank with retries and timeout scenarios"
 
 Задача независима от Task 16. Обе правят `cmd/gateway/banks.go`, `cmd/mockbank/main.go`, `cmd/mockbank/main_test.go` и `compose.yaml` — точечно, в разных строках; конфликт при merge второго PR решается объединением обеих правок.
 
-**Промпт для облачной сессии:** «Выполни Task 17 из docs/plan.md в ветке feature/westbank от develop. Следуй CLAUDE.md. В конце — `make lint && make test`, строка в docs/dev-log.md и PR в develop.»
+**Промпт для облачной сессии:** «Выполни Task 17 из docs/plan.md в ветке feature/westbank от develop. Следуй CLAUDE.md и подразделу „Облачные сессии“ плана. В конце — `make lint && make test`, строка в docs/dev-log.md и PR в develop.»
 
 **Files:**
 - Create: `internal/mockbank/west.go`, `internal/bank/westbank/westbank.go`
