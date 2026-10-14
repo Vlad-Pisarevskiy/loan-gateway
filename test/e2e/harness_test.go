@@ -7,6 +7,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -41,9 +42,10 @@ type options struct {
 }
 
 type env struct {
-	t    *testing.T
-	url  string
-	pool *pgxpool.Pool
+	t      *testing.T
+	url    string
+	pool   *pgxpool.Pool
+	client *http.Client // клиент к API с таймаутом, чтобы зависший API не держал тест до общего таймаута
 }
 
 // start поднимает шлюз (API и воркер) с заглушками банков; всё останавливается в t.Cleanup.
@@ -102,15 +104,19 @@ func start(t *testing.T, o options) *env {
 	}, log)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	var runErr error
 	go func() {
 		defer close(done)
-		_ = worker.Run(ctx)
+		runErr = worker.Run(ctx)
 	}()
 	t.Cleanup(func() {
 		cancel()
 		<-done
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			t.Errorf("worker: %v", runErr)
+		}
 	})
-	return &env{t: t, url: apiURL, pool: pool}
+	return &env{t: t, url: apiURL, pool: pool, client: &http.Client{Timeout: 5 * time.Second}}
 }
 
 type offerView struct {
@@ -173,7 +179,7 @@ func (e *env) post(key string, body map[string]any) (int, applicationView) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", key)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := e.client.Do(req)
 	if err != nil {
 		e.t.Fatalf("POST: %v", err)
 	}
@@ -192,7 +198,7 @@ func (e *env) post(key string, body map[string]any) (int, applicationView) {
 // get читает заявку.
 func (e *env) get(id string) applicationView {
 	e.t.Helper()
-	resp, err := http.Get(e.url + "/v1/applications/" + id)
+	resp, err := e.client.Get(e.url + "/v1/applications/" + id)
 	if err != nil {
 		e.t.Fatalf("GET: %v", err)
 	}

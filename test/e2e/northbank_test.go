@@ -29,7 +29,7 @@ func TestNorthbankApproves(t *testing.T) {
 func TestNorthbankRejects(t *testing.T) {
 	e := start(t, options{banks: []mockBank{northbankMock(mockbank.Options{})}})
 	got := e.submit(func(in map[string]any) { in["monthly_income"] = 2_000_000 }).bank(t, northbank.Code)
-	if got.Status != "rejected" || got.RejectReason != "insufficient_income" {
+	if got.Status != "rejected" || got.RejectReason != "insufficient_income" || got.Attempts != 1 || got.Offer != nil {
 		t.Fatalf("northbank = %+v, want rejected with insufficient_income", got)
 	}
 }
@@ -60,5 +60,15 @@ func TestSameKeyWithDifferentBodyConflicts(t *testing.T) {
 	other["amount"] = 40_000_000
 	if code, _ := e.post("conflict-key", other); code != http.StatusConflict {
 		t.Fatalf("second POST returned %d, want 409", code)
+	}
+	// Конфликт ничего не создаёт: остаются одна заявка и один запрос в банк.
+	var apps, requests int
+	err := e.pool.QueryRow(t.Context(),
+		`SELECT (SELECT count(*) FROM applications), (SELECT count(*) FROM bank_requests)`).Scan(&apps, &requests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apps != 1 || requests != 1 {
+		t.Fatalf("applications = %d, bank requests = %d, want 1 and 1", apps, requests)
 	}
 }
