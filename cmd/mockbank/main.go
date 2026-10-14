@@ -56,6 +56,8 @@ func newHandler(_ context.Context, cfg config.Mockbank, _ *slog.Logger) (http.Ha
 	switch cfg.Dialect {
 	case "north":
 		return mockbank.NewNorth(opts), nil
+	case "east":
+		return mockbank.NewEast(opts), nil
 	default:
 		return nil, fmt.Errorf("dialect %q is not implemented", cfg.Dialect)
 	}
