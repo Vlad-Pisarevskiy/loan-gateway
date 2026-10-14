@@ -52,6 +52,9 @@ func TestValidateRejectsInvalidFields(t *testing.T) {
 		field string
 	}{
 		{"blank name", func(in *Input) { in.FullName = "   " }, "full_name"},
+		{"NUL in name", func(in *Input) { in.FullName = "Иванов\x00Иван" }, "full_name"},
+		{"control character in name", func(in *Input) { in.FullName = "Иванов\nИван" }, "full_name"},
+		{"long name with NUL", func(in *Input) { in.FullName = strings.Repeat("\x00", 201) }, "full_name"},
 		{"bad birth date format", func(in *Input) { in.BirthDate = "17.05.1990" }, "birth_date"},
 		{"turns 18 tomorrow", func(in *Input) { in.BirthDate = "2008-10-14" }, "birth_date"},
 		{"turned 76 today", func(in *Input) { in.BirthDate = "1950-10-13" }, "birth_date"},

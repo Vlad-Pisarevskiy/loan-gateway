@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -47,6 +48,9 @@ func Validate(in Input, now time.Time) (Application, error) {
 	name := strings.TrimSpace(in.FullName)
 	if n := utf8.RuneCountInString(name); n < 1 || n > maxNameRunes {
 		add("full_name", fmt.Sprintf("must be 1-%d characters", maxNameRunes))
+	} else if strings.ContainsFunc(name, unicode.IsControl) {
+		// NUL PostgreSQL в text не принимает: без проверки клиент получил бы 500 вместо 400.
+		add("full_name", "must not contain control characters")
 	}
 	birth, err := time.Parse(time.DateOnly, in.BirthDate)
 	if err != nil {
