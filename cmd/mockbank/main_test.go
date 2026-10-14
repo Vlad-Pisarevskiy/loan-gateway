@@ -15,4 +15,7 @@ func TestNewHandlerSelectsDialect(t *testing.T) {
 	if _, err := newHandler(t.Context(), config.Mockbank{Dialect: "south"}, log); err == nil {
 		t.Fatal("unknown dialect must fail")
 	}
+	if h, err := newHandler(t.Context(), config.Mockbank{Dialect: "east"}, log); err != nil || h == nil {
+		t.Fatalf("east: handler %v, err %v", h, err)
+	}
 }

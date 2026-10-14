@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank/eastbank"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank/northbank"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/config"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/httpapi"
@@ -16,6 +17,7 @@ import (
 
 // adapters — банки, которые умеет шлюз. Новый банк = новый адаптер + строка здесь.
 var adapters = map[string]func(baseURL string, c *http.Client) bank.Bank{
+	eastbank.Code:  func(u string, c *http.Client) bank.Bank { return eastbank.New(u, c) },
 	northbank.Code: func(u string, c *http.Client) bank.Bank { return northbank.New(u, c) },
 }
 

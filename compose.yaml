@@ -7,6 +7,7 @@ x-gateway-env: &gateway-env
   DATABASE_URL: postgres://gateway:gateway@postgres:5432/gateway?sslmode=disable
   LOG_LEVEL: info
   BANK_NORTHBANK_URL: http://northbank:8090
+  BANK_EASTBANK_URL: http://eastbank:8090
 
 services:
   postgres:
@@ -52,3 +53,11 @@ services:
     command: ["mockbank"]
     environment:
       MOCKBANK_DIALECT: north
+
+  eastbank:
+    <<: *app
+    command: ["mockbank"]
+    environment:
+      MOCKBANK_DIALECT: east
+      MOCKBANK_LATENCY: 1s
+      MOCKBANK_FAIL_FIRST: "2"
