@@ -35,7 +35,7 @@ func count(t *testing.T, pool *pgxpool.Pool, query string, args ...any) int {
 }
 
 // exec выполняет SQL для подготовки состояния в тесте.
-func exec(t *testing.T, pool *pgxpool.Pool, query string, args ...any) { //nolint:unused // нужен тестам очереди (Task 6)
+func exec(t *testing.T, pool *pgxpool.Pool, query string, args ...any) {
 	t.Helper()
 	if _, err := pool.Exec(t.Context(), query, args...); err != nil {
 		t.Fatalf("exec: %v", err)
