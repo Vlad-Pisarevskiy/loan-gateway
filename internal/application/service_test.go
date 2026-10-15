@@ -75,6 +75,9 @@ func TestServiceCreateIsIdempotent(t *testing.T) {
 	if first.ID != second.ID {
 		t.Fatalf("repeat returned %s, want %s", second.ID, first.ID)
 	}
+	if first.Replayed || !second.Replayed {
+		t.Fatalf("Replayed: first %v, second %v; want false then true", first.Replayed, second.Replayed)
+	}
 }
 
 func TestServiceCreateConflict(t *testing.T) {

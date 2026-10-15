@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/application"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank"
 )
@@ -24,14 +26,16 @@ type callbackCall struct {
 }
 
 type fakeCallbacks struct {
-	result application.CallbackResult
-	err    error
-	calls  []callbackCall
+	result      application.CallbackResult
+	requestID   uuid.UUID
+	traceParent string
+	err         error
+	calls       []callbackCall
 }
 
 func (f *fakeCallbacks) ApplyCallback(_ context.Context, bankCode, externalID string, d application.Decision) (application.CallbackApply, error) {
 	f.calls = append(f.calls, callbackCall{bankCode: bankCode, externalID: externalID, decision: d})
-	return application.CallbackApply{Result: f.result}, f.err
+	return application.CallbackApply{Result: f.result, RequestID: f.requestID, TraceParent: f.traceParent}, f.err
 }
 
 // testCallbackHandler разбирает тело вида {"id":"...","approved":true,"reason":"..."}.
