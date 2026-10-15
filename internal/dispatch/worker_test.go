@@ -1,11 +1,13 @@
 package dispatch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,17 +24,24 @@ type completion struct {
 	outcome Outcome
 }
 
-// fakeQueue — очередь в памяти.
+// fakeQueue — очередь в памяти. Флаги hang* задаются до запуска воркера и не меняются.
 type fakeQueue struct {
-	mu        sync.Mutex
-	pending   []Task
-	claimErrs int // сколько первых вызовов Claim вернут ошибку
-	limits    []int
-	completed []completion
-	sweeps    int
+	mu           sync.Mutex
+	pending      []Task
+	claimErrs    int  // сколько первых вызовов Claim вернут ошибку
+	hangDB       bool // Claim и Sweep висят до отмены ctx, как запрос к зависшей БД
+	hangComplete bool // Complete висит до отмены ctx или закрытия unblock
+	unblock      chan struct{}
+	limits       []int
+	completed    []completion
+	sweeps       int
 }
 
-func (q *fakeQueue) Claim(_ context.Context, limit int, _ time.Duration) ([]Task, error) {
+func (q *fakeQueue) Claim(ctx context.Context, limit int, _ time.Duration) ([]Task, error) {
+	if q.hangDB {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.limits = append(q.limits, limit)
@@ -46,14 +55,27 @@ func (q *fakeQueue) Claim(_ context.Context, limit int, _ time.Duration) ([]Task
 	return tasks, nil
 }
 
-func (q *fakeQueue) Complete(_ context.Context, t Task, o Outcome) (bool, error) {
+func (q *fakeQueue) Complete(ctx context.Context, t Task, o Outcome) (bool, error) {
+	if q.hangComplete {
+		select {
+		case <-ctx.Done():
+		case <-q.unblock:
+		}
+	}
+	if err := ctx.Err(); err != nil { // как pgx: с отменённым контекстом запрос не выполняется
+		return false, err
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.completed = append(q.completed, completion{task: t, outcome: o})
 	return true, nil
 }
 
-func (q *fakeQueue) Sweep(context.Context, int) (SweepStats, error) {
+func (q *fakeQueue) Sweep(ctx context.Context, _ int) (SweepStats, error) {
+	if q.hangDB {
+		<-ctx.Done()
+		return SweepStats{}, ctx.Err()
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.sweeps++
@@ -70,6 +92,12 @@ func (q *fakeQueue) claimLimits() []int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return slices.Clone(q.limits)
+}
+
+func (q *fakeQueue) pendingCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.pending)
 }
 
 func (q *fakeQueue) sweepCount() int {
@@ -127,6 +155,31 @@ func newTestWorker(t *testing.T, q Queue, cfg Config, banks ...bank.Bank) *Worke
 		t.Fatal(err)
 	}
 	return New(q, reg, cfg, slog.New(slog.NewTextHandler(t.Output(), nil)))
+}
+
+// syncBuffer — буфер для логов, в который пишут несколько горутин.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// captureLogs перенаправляет логи воркера в буфер.
+func captureLogs(w *Worker) *syncBuffer {
+	var buf syncBuffer
+	w.log = slog.New(slog.NewTextHandler(&buf, nil))
+	return &buf
 }
 
 func newTask(code string, attempts int) Task {
@@ -274,6 +327,31 @@ func TestRunKeepsWorkingAfterClaimError(t *testing.T) {
 	eventually(t, "completion after claim errors", func() bool { return len(q.completions()) == 1 })
 }
 
+func TestRunSurvivesHangingDatabase(t *testing.T) {
+	cfg := testConfig()
+	cfg.DBTimeout = 20 * time.Millisecond
+	w := newTestWorker(t, &fakeQueue{hangDB: true}, cfg, fakeBank{code: "northbank", submit: decide})
+	logs := captureLogs(w)
+	runWorker(t, w)
+	eventually(t, "claim and sweep failures in log", func() bool {
+		s := logs.String()
+		return strings.Contains(s, "claim failed") && strings.Contains(s, "sweep failed")
+	})
+}
+
+func TestRunDoesNotHangOnSavingResult(t *testing.T) {
+	cfg := testConfig()
+	cfg.DBTimeout = 20 * time.Millisecond
+	q := &fakeQueue{pending: []Task{newTask("northbank", 1)}, hangComplete: true, unblock: make(chan struct{})}
+	w := newTestWorker(t, q, cfg, fakeBank{code: "northbank", submit: decide})
+	logs := captureLogs(w)
+	runWorker(t, w)
+	t.Cleanup(func() { close(q.unblock) }) // при регрессии остановка не должна висеть до -timeout
+	eventually(t, "save failure in log", func() bool {
+		return strings.Contains(logs.String(), "save bank result failed")
+	})
+}
+
 func TestRunSweeps(t *testing.T) {
 	q := &fakeQueue{}
 	runWorker(t, newTestWorker(t, q, testConfig(), fakeBank{code: "northbank", submit: decide}))
@@ -293,7 +371,10 @@ func TestRunRespectsConcurrency(t *testing.T) {
 				break
 			}
 		}
-		<-release
+		select {
+		case <-release:
+		case <-ctx.Done(): // тест упал до close(release): не виснуть на остановке
+		}
 		inFlight.Add(-1)
 		return decide(ctx, req)
 	}
@@ -305,6 +386,9 @@ func TestRunRespectsConcurrency(t *testing.T) {
 
 	eventually(t, "2 tasks in flight", func() bool { return inFlight.Load() == 2 })
 	time.Sleep(30 * time.Millisecond) // дать воркеру шанс взять лишнее, если ограничение сломано
+	if n := q.pendingCount(); n != 3 {
+		t.Fatalf("pending = %d, want 3: worker claimed beyond free slots", n)
+	}
 	close(release)
 	eventually(t, "5 completions", func() bool { return len(q.completions()) == 5 })
 	if m := maxInFlight.Load(); m > 2 {
@@ -319,15 +403,20 @@ func TestRunRespectsConcurrency(t *testing.T) {
 
 func TestRunWaitsForInFlightTaskOnShutdown(t *testing.T) {
 	started := make(chan struct{})
+	ctxErr := make(chan error, 1)
 	submit := func(ctx context.Context, req bank.SubmitRequest) (bank.SubmitResult, error) {
 		close(started)
 		time.Sleep(50 * time.Millisecond) // банк отвечает, не глядя на отмену
+		ctxErr <- ctx.Err()
 		return decide(ctx, req)
 	}
 	q := &fakeQueue{pending: []Task{newTask("northbank", 1)}}
 	stop := runWorker(t, newTestWorker(t, q, testConfig(), fakeBank{code: "northbank", submit: submit}))
 	<-started
 	stop()
+	if err := <-ctxErr; err != nil {
+		t.Fatalf("bank call context = %v before ShutdownTimeout, want alive", err)
+	}
 	if n := len(q.completions()); n != 1 {
 		t.Fatalf("completions after shutdown = %d, want 1", n)
 	}
@@ -347,7 +436,12 @@ func TestRunCancelsInFlightTaskAfterShutdownTimeout(t *testing.T) {
 	<-started
 	begin := time.Now()
 	stop()
-	if elapsed := time.Since(begin); elapsed > time.Second {
-		t.Fatalf("shutdown took %s, want about ShutdownTimeout", elapsed)
+	if elapsed := time.Since(begin); elapsed < cfg.ShutdownTimeout || elapsed > time.Second {
+		t.Fatalf("shutdown took %s, want about ShutdownTimeout %s", elapsed, cfg.ShutdownTimeout)
+	}
+	// Отменённый вызов записан как временная ошибка: задача уйдёт в повтор, не дожидаясь конца аренды.
+	got := q.completions()
+	if len(got) != 1 || got[0].outcome.Kind != OutcomeRetry {
+		t.Fatalf("completions = %+v, want one retry", got)
 	}
 }

@@ -35,6 +35,7 @@ services:
   api:
     <<: *app
     command: ["gateway", "api"]
+    stop_grace_period: 30s # SHUTDOWN_TIMEOUT (20s) и запись результатов; по умолчанию Docker ждёт 10s
     environment: *gateway-env
     ports:
       - "8080:8080"
@@ -45,6 +46,7 @@ services:
   worker:
     <<: *app
     command: ["gateway", "worker"]
+    stop_grace_period: 30s # SHUTDOWN_TIMEOUT (20s) и запись результатов; по умолчанию Docker ждёт 10s
     environment: *gateway-env
     depends_on:
       migrate:

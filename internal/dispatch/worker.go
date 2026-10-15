@@ -13,6 +13,9 @@ import (
 // DefaultBankTimeout — таймаут вызова банка, если он не задан в Config.BankTimeouts.
 const DefaultBankTimeout = 5 * time.Second
 
+// DefaultDBTimeout — таймаут одного обращения к очереди, если Config.DBTimeout не задан.
+const DefaultDBTimeout = 5 * time.Second
+
 // Config — параметры воркера (раздел 9 спеки).
 type Config struct {
 	PollInterval    time.Duration
@@ -26,6 +29,7 @@ type Config struct {
 	SweepInterval   time.Duration
 	ShutdownTimeout time.Duration
 	BankTimeouts    map[string]time.Duration // таймаут вызова по коду банка
+	DBTimeout       time.Duration            // таймаут одного обращения к очереди; 0 — DefaultDBTimeout
 }
 
 // Worker забирает задачи из очереди, вызывает банки и записывает результаты.
@@ -43,7 +47,8 @@ func New(queue Queue, banks *bank.Registry, cfg Config, log *slog.Logger) *Worke
 }
 
 // Run обрабатывает очередь до отмены ctx. После отмены перестаёт брать задачи и ждёт текущие
-// не дольше ShutdownTimeout, затем отменяет их; незавершённые задачи вернёт чистильщик.
+// не дольше ShutdownTimeout, затем отменяет вызовы банков; их результаты записываются как
+// временные ошибки, а то, что записать не удалось, вернёт чистильщик.
 func (w *Worker) Run(ctx context.Context) error {
 	// У задач свой контекст: отмена ctx не должна обрывать вызовы банков сразу.
 	taskCtx, cancelTasks := context.WithCancel(context.WithoutCancel(ctx))
@@ -77,7 +82,9 @@ func (w *Worker) poll(ctx, taskCtx context.Context, slots chan struct{}, wg *syn
 	if limit <= 0 {
 		return
 	}
-	tasks, err := w.queue.Claim(ctx, limit, w.cfg.Lease)
+	claimCtx, cancel := context.WithTimeout(ctx, w.dbTimeout())
+	defer cancel()
+	tasks, err := w.queue.Claim(claimCtx, limit, w.cfg.Lease)
 	if err != nil {
 		if ctx.Err() == nil {
 			w.log.Error("claim failed", "error", err)
@@ -94,7 +101,9 @@ func (w *Worker) poll(ctx, taskCtx context.Context, slots chan struct{}, wg *syn
 }
 
 func (w *Worker) sweep(ctx context.Context) {
-	s, err := w.queue.Sweep(ctx, w.cfg.MaxAttempts)
+	sweepCtx, cancel := context.WithTimeout(ctx, w.dbTimeout())
+	defer cancel()
+	s, err := w.queue.Sweep(sweepCtx, w.cfg.MaxAttempts)
 	if err != nil {
 		if ctx.Err() == nil {
 			w.log.Error("sweep failed", "error", err)
@@ -129,7 +138,11 @@ func (w *Worker) process(ctx context.Context, t Task) {
 	log := w.log.With("bank_request_id", t.RequestID, "application_id", t.Application.ID,
 		"bank_code", t.BankCode, "attempt", t.Attempts)
 	out := w.call(ctx, t)
-	ok, err := w.queue.Complete(ctx, t, out)
+	// Запись не зависит от отмены задач: иначе ответ банка, полученный к ShutdownTimeout,
+	// пропадёт, а задача провисит в sending до конца аренды. Таймаут — на случай зависшей БД.
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.dbTimeout())
+	defer cancel()
+	ok, err := w.queue.Complete(saveCtx, t, out)
 	switch {
 	case err != nil:
 		log.Error("save bank result failed", "outcome", out.Kind.String(), "error", err)
@@ -168,6 +181,13 @@ func (w *Worker) call(ctx context.Context, t Task) Outcome {
 		return Outcome{Kind: OutcomeFailed, Error: "bank returned neither decision nor external id"}
 	}
 	return Outcome{Kind: OutcomeAccepted, ExternalID: res.ExternalID, CallbackTimeout: w.cfg.CallbackTimeout}
+}
+
+func (w *Worker) dbTimeout() time.Duration {
+	if w.cfg.DBTimeout > 0 {
+		return w.cfg.DBTimeout
+	}
+	return DefaultDBTimeout
 }
 
 func (w *Worker) bankTimeout(code string) time.Duration {

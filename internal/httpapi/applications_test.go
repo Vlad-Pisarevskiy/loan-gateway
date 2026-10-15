@@ -84,12 +84,56 @@ func TestCreateApplicationRejectsBadRequests(t *testing.T) {
 }
 
 func TestCreateApplicationBodyTooLarge(t *testing.T) {
-	body := `{"full_name":"` + strings.Repeat("a", 1<<20) + `"}`
-	rec := do(newTestHandler(t, &fakeService{}), http.MethodPost, "/v1/applications", body, withKey("k"))
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("code = %d, want 413", rec.Code)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"huge field", `{"full_name":"` + strings.Repeat("a", 1<<20) + `"}`},
+		{"valid object with huge tail", validBody + strings.Repeat(" ", 1<<20)},
+		{"valid object, garbage, huge tail", validBody + "x" + strings.Repeat(" ", 1<<20)},
+		{"two objects and huge tail", validBody + "{}" + strings.Repeat(" ", 1<<20)},
+		{"syntax error at start", `{"full_name" 1}` + strings.Repeat(" ", 1<<20)},
+		{"unknown field and huge tail", `{"zzz":1}` + strings.Repeat(" ", 1<<20)},
 	}
-	decodeProblem(t, rec)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := do(newTestHandler(t, &fakeService{}), http.MethodPost, "/v1/applications", tt.body, withKey("k"))
+			if rec.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("code = %d, want 413", rec.Code)
+			}
+			decodeProblem(t, rec)
+		})
+	}
+}
+
+func TestUnknownRoutesReturnProblem(t *testing.T) {
+	id := uuid.NewString()
+	tests := []struct {
+		method, path string
+		code         int
+		allow        string
+	}{
+		{http.MethodGet, "/v1/nope", http.StatusNotFound, ""},
+		{http.MethodGet, "/v1/applications/", http.StatusNotFound, ""},
+		{http.MethodPut, "/v1/applications", http.StatusMethodNotAllowed, "POST"},
+		{http.MethodDelete, "/v1/applications/" + id, http.StatusMethodNotAllowed, "GET, HEAD"},
+		{http.MethodGet, "/v1/webhooks/banks/westbank", http.StatusMethodNotAllowed, "POST"},
+		{http.MethodPost, "/healthz", http.StatusMethodNotAllowed, "GET, HEAD"},
+		{http.MethodPost, "/readyz", http.StatusMethodNotAllowed, "GET, HEAD"},
+	}
+	h := newTestHandler(t, &fakeService{})
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			rec := do(h, tt.method, tt.path, "", nil)
+			if rec.Code != tt.code {
+				t.Fatalf("code = %d, want %d", rec.Code, tt.code)
+			}
+			if got := rec.Header().Get("Allow"); got != tt.allow {
+				t.Fatalf("Allow = %q, want %q", got, tt.allow)
+			}
+			decodeProblem(t, rec)
+		})
+	}
 }
 
 func TestCreateApplicationServiceErrors(t *testing.T) {
@@ -170,4 +214,20 @@ func TestGetApplicationErrors(t *testing.T) {
 		t.Fatalf("unknown id: code = %d, want 404", rec.Code)
 	}
 	decodeProblem(t, rec)
+}
+
+func TestHeadUsesGetRoutes(t *testing.T) {
+	svc := &fakeService{get: func(context.Context, uuid.UUID) (application.View, error) {
+		return application.View{}, application.ErrNotFound
+	}}
+	h := newTestHandler(t, svc)
+	for path, want := range map[string]int{
+		"/healthz":                             http.StatusOK,
+		"/readyz":                              http.StatusOK,
+		"/v1/applications/" + uuid.NewString(): http.StatusNotFound,
+	} {
+		if rec := do(h, http.MethodHead, path, "", nil); rec.Code != want {
+			t.Errorf("HEAD %s: code = %d, want %d", path, rec.Code, want)
+		}
+	}
 }
