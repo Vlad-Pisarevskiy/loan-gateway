@@ -12,6 +12,7 @@ import (
 
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/config"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/store/postgres"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry"
 )
 
 const usage = "usage: gateway api|worker|migrate"
@@ -31,7 +32,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	log := slog.New(telemetry.NewLogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
