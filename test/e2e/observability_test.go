@@ -74,13 +74,24 @@ func TestTraceFollowsApplication(t *testing.T) {
 	if len(links) != 1 {
 		t.Fatalf("callback links = %d, want 1", len(links))
 	}
-	found := false
-	for _, hook := range telemetrytest.Spans(e.spans, "POST /v1/webhooks/banks/{code}") {
-		if hook.SpanContext().SpanID() == links[0].SpanContext.SpanID() {
-			found = hook.SpanContext().TraceID() != traceID
+	// Спан вебхука заканчивается позже спана callback (в defer после обработчика), поэтому ждём его.
+	linked := links[0].SpanContext.SpanID()
+	var hook sdktrace.ReadOnlySpan
+	deadline := time.Now().Add(5 * time.Second)
+	for hook == nil {
+		for _, s := range telemetrytest.Spans(e.spans, "POST /v1/webhooks/banks/{code}") {
+			if s.SpanContext().SpanID() == linked {
+				hook = s
+			}
+		}
+		if hook == nil {
+			if time.Now().After(deadline) {
+				t.Fatal("linked webhook span not found in 5s")
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	if !found {
+	if hook.SpanContext().TraceID() == traceID {
 		t.Fatal("callback span must link to the webhook span that started its own trace")
 	}
 }

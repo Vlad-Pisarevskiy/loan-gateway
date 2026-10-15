@@ -38,7 +38,7 @@ make down
 | Prometheus: метрики и алерты (`TargetDown`, `BankErrorRateHigh`, `QueueBacklog`, `CallbackTimeouts`) | http://localhost:9090/alerts |
 | Jaeger: трейс заявки — API, все попытки по каждому банку и вебхук westbank в одном трейсе | http://localhost:16686 |
 
-Метрики `api` и `worker` — на `:9100/metrics`. В логах записи о запросах и задачах содержат `trace_id`. Подробно — раздел 14 [спецификации](docs/spec.md).
+Метрики `api` и `worker` — на `:9100/metrics` внутри сети compose (на хост порт не проброшен; снаружи метрики видны через Prometheus). В логах записи о запросах и задачах содержат `trace_id`. Подробно — раздел 14 [спецификации](docs/spec.md).
 
 ## Разработка
 
