@@ -55,7 +55,12 @@ func (s *Service) Create(ctx context.Context, key string, in Input) (View, error
 	if !bytes.Equal(stored, hash) {
 		return View{}, ErrIdempotencyConflict
 	}
-	return s.repo.Get(ctx, id)
+	v, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return View{}, err
+	}
+	v.Replayed = id != app.ID
+	return v, nil
 }
 
 // Get возвращает заявку или ErrNotFound.
