@@ -1,0 +1,71 @@
+# Юнит-тесты правил алертов: make obs-check (promtool test rules).
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'loangw_bank_calls_total{bank="eastbank",outcome="retry"}'
+        values: '0+2x15'
+      - series: 'loangw_bank_calls_total{bank="eastbank",outcome="decision"}'
+        values: '0+1x15'
+      - series: 'loangw_bank_calls_total{bank="northbank",outcome="decision"}'
+        values: '0+3x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BankErrorRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bank: eastbank
+            exp_annotations:
+              summary: "У eastbank больше 20 % вызовов заканчиваются ретраем или ошибкой"
+
+  - interval: 1m
+    input_series:
+      - series: 'up{job="worker",instance="worker:9100"}'
+        values: '1 1 0 0 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: TargetDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: worker
+              instance: "worker:9100"
+            exp_annotations:
+              summary: "worker не отвечает на опрос Prometheus"
+
+  - interval: 1m
+    input_series:
+      - series: 'loangw_queue_oldest_age_seconds{job="worker",instance="worker:9100"}'
+        values: '0 30 70 80 90 100'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: QueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Готовая задача ждёт отправки дольше минуты"
+
+  - interval: 1m
+    input_series:
+      - series: 'loangw_sweeper_actions_total{action="callback_timeout",job="worker",instance="worker:9100"}'
+        values: '0 0 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: CallbackTimeouts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              action: callback_timeout
+              job: worker
+              instance: "worker:9100"
+            exp_annotations:
+              summary: "Банк не прислал вебхук к дедлайну"

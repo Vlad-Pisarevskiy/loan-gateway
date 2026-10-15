@@ -10,6 +10,7 @@
 - `make lint` — gofmt, go vet, golangci-lint
 - `make up` / `make down` — поднять и остановить систему в docker compose
 - `make demo` — отправить заявку и дождаться решений (нужен `jq`)
+- `make obs-check` — конфиг Prometheus, тесты алертов, JSON дашборда (нужен Docker)
 
 ## Карта пакетов
 
@@ -24,6 +25,7 @@
 - `internal/config` — конфигурация из env
 - `internal/telemetry` — метрики Prometheus, трейсинг OpenTelemetry, `trace_id` в логах (раздел 14 спеки); `telemetrytest` — помощники тестов
 - `test/e2e` — end-to-end тесты
+- `deploy/observability` — конфиги Prometheus, алерты с тестами, provisioning и дашборд Grafana
 
 ## Соглашения
 

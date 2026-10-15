@@ -1,4 +1,4 @@
-# Локальное окружение: PostgreSQL, миграции, API, воркер и заглушки банков.
+# Локальное окружение: PostgreSQL, миграции, API, воркер, заглушки банков, Prometheus, Jaeger и Grafana.
 x-app: &app
   image: loan-gateway:dev
   build: .
@@ -10,6 +10,7 @@ x-gateway-env: &gateway-env
   BANK_EASTBANK_URL: http://eastbank:8090
   BANK_WESTBANK_URL: http://westbank:8090
   BANK_WESTBANK_WEBHOOK_SECRET: local-west-secret
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
 
 services:
   postgres:
@@ -36,7 +37,9 @@ services:
     <<: *app
     command: ["gateway", "api"]
     stop_grace_period: 30s # SHUTDOWN_TIMEOUT (20s) и запись результатов; по умолчанию Docker ждёт 10s
-    environment: *gateway-env
+    environment:
+      <<: *gateway-env
+      OTEL_SERVICE_NAME: gateway-api
     ports:
       - "8080:8080"
     depends_on:
@@ -47,7 +50,9 @@ services:
     <<: *app
     command: ["gateway", "worker"]
     stop_grace_period: 30s # SHUTDOWN_TIMEOUT (20s) и запись результатов; по умолчанию Docker ждёт 10s
-    environment: *gateway-env
+    environment:
+      <<: *gateway-env
+      OTEL_SERVICE_NAME: gateway-worker
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -74,3 +79,32 @@ services:
       MOCKBANK_CALLBACK_URL: http://api:8080/v1/webhooks/banks/westbank
       MOCKBANK_CALLBACK_SECRET: local-west-secret
       MOCKBANK_CALLBACK_DELAY: 5s
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+
+  jaeger:
+    image: jaegertracing/jaeger:2.21.0
+    ports:
+      - "16686:16686" # UI; приём OTLP (4318) доступен только внутри сети compose
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    environment:
+      # Анонимный вход с правами администратора — только для локального стенда.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - jaeger
