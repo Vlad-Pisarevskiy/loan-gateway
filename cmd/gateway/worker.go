@@ -32,7 +32,7 @@ func runWorker(ctx context.Context, cfg config.Gateway, log *slog.Logger) error 
 	queue := postgres.NewQueue(pool)
 	metricsReg := telemetry.NewRegistry()
 	metrics := telemetry.NewMetrics(metricsReg)
-	metrics.RegisterQueueStats(metricsReg, queue.Stats, queueStatsTimeout)
+	metrics.RegisterQueueStats(metricsReg, queue.Stats, queueStatsTimeout, reg.Codes())
 	w := dispatch.New(queue, reg, dispatch.Config{
 		PollInterval:    cfg.PollInterval,
 		BatchSize:       cfg.BatchSize,

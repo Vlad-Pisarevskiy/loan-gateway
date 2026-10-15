@@ -101,7 +101,7 @@ func start(t *testing.T, o options) *env {
 	api.Start()
 	t.Cleanup(api.Close)
 
-	workerMetrics.RegisterQueueStats(workerReg, queue.Stats, time.Second)
+	workerMetrics.RegisterQueueStats(workerReg, queue.Stats, time.Second, reg.Codes())
 	worker := dispatch.New(queue, reg, dispatch.Config{
 		PollInterval:    20 * time.Millisecond,
 		BatchSize:       10,

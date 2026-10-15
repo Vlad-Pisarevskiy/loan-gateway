@@ -177,6 +177,7 @@ func TestMetricsEndpoints(t *testing.T) {
 		`loangw_bank_decisions_total{bank="northbank",status="approved",via="sync"} 1`,
 		`loangw_bank_call_duration_seconds_count{bank="northbank",outcome="decision"} 1`,
 		`loangw_sweeper_actions_total{action="requeued"}`,
+		`loangw_bank_requests{bank="northbank",status="queued"} 0`,
 		`loangw_worker_tasks_in_flight 0`,
 		`loangw_queue_oldest_age_seconds 0`,
 	})
