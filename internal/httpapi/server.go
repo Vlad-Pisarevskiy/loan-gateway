@@ -4,7 +4,9 @@ package httpapi
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -64,6 +66,7 @@ func NewHandler(d Deps) http.Handler {
 	if d.Tracer == nil {
 		d.Tracer = noop.NewTracerProvider().Tracer("")
 	}
+	d.Metrics.InitAPISeries(slices.Sorted(maps.Keys(d.WebhookBanks)))
 	a := &api{Deps: d}
 	routes := []struct {
 		method, path string

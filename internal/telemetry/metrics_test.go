@@ -70,6 +70,31 @@ func TestNilMetricsIsNoop(t *testing.T) {
 	m.QueueError(telemetry.OpSweep)
 	m.LeaseLost()
 	m.Swept(1, 1, 1)
+	m.InitWorkerSeries([]string{"northbank"})
+	m.InitAPISeries([]string{"westbank"})
+}
+
+// TestInitSeriesStartAtZero: серии создаются с нулём до первого события. Value не отличает 0 от
+// отсутствия серии, поэтому наличие проверяем по тексту экспозиции.
+func TestInitSeriesStartAtZero(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := telemetry.NewMetrics(reg)
+	m.InitWorkerSeries([]string{"northbank"})
+	m.InitAPISeries([]string{"westbank"})
+	rec := httptest.NewRecorder()
+	telemetry.Handler(reg).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	for _, want := range []string{
+		`loangw_bank_calls_total{bank="northbank",outcome="retry"} 0`,
+		`loangw_bank_decisions_total{bank="northbank",status="approved",via="sync"} 0`,
+		`loangw_webhooks_total{bank="westbank",result="applied"} 0`,
+		`loangw_webhooks_total{bank="other",result="unknown_bank"} 0`,
+		`loangw_bank_decisions_total{bank="westbank",status="rejected",via="webhook"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("exposition has no %q", want)
+		}
+	}
 }
 
 func TestRegistryHasRuntimeMetrics(t *testing.T) {

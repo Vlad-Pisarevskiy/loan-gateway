@@ -3,6 +3,10 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -92,8 +96,8 @@ func TestProcessCountsLostLeaseAndSaveErrors(t *testing.T) {
 	if got := telemetrytest.Value(t, reg, "loangw_lease_lost_total", nil); got != 1 {
 		t.Errorf("lease_lost_total = %v, want 1", got)
 	}
-	if telemetrytest.Has(t, reg, "loangw_bank_decisions_total") {
-		t.Error("decision is counted although it was not saved")
+	if got := telemetrytest.Value(t, reg, "loangw_bank_decisions_total", map[string]string{"bank": "northbank", "status": "approved", "via": "sync"}); got != 0 {
+		t.Errorf("decision is counted although it was not saved: %v", got)
 	}
 
 	w, reg, _ = newObservedWorker(t, &fakeQueue{completeErr: errors.New("db down")}, fakeBank{code: "northbank", submit: decide})
@@ -206,6 +210,31 @@ func TestCompleteSpanResult(t *testing.T) {
 		w.process(t.Context(), newTask("northbank", 1))
 		if got := telemetrytest.Attr(oneSpan(t, rec, "queue.complete"), "result"); got != tt.want {
 			t.Errorf("complete result = %q, want %q", got, tt.want)
+		}
+	}
+}
+
+// TestWorkerCreatesBankSeriesAtStart: серии по банкам видны до первой задачи.
+func TestWorkerCreatesBankSeriesAtStart(t *testing.T) {
+	_, reg, _ := newObservedWorker(t, &fakeQueue{}, fakeBank{code: "northbank", submit: decide})
+	rec := httptest.NewRecorder()
+	telemetry.Handler(reg).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, want := range []string{
+		`loangw_bank_calls_total{bank="northbank",outcome="failed"} 0`,
+		`loangw_bank_decisions_total{bank="northbank",status="approved",via="sync"} 0`,
+	} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("exposition has no %q", want)
+		}
+	}
+}
+
+// TestOutcomeKindsAreKnownMetricValues: значения outcome, которые пишет воркер, входят в набор,
+// из которого создаются нулевые серии.
+func TestOutcomeKindsAreKnownMetricValues(t *testing.T) {
+	for _, k := range []OutcomeKind{OutcomeDecision, OutcomeAccepted, OutcomeRetry, OutcomeFailed} {
+		if !slices.Contains(telemetry.BankOutcomes, k.String()) {
+			t.Errorf("outcome %q is not in telemetry.BankOutcomes", k)
 		}
 	}
 }
