@@ -28,9 +28,12 @@ type completion struct {
 type fakeQueue struct {
 	mu           sync.Mutex
 	pending      []Task
-	claimErrs    int  // сколько первых вызовов Claim вернут ошибку
-	hangDB       bool // Claim и Sweep висят до отмены ctx, как запрос к зависшей БД
-	hangComplete bool // Complete висит до отмены ctx или закрытия unblock
+	claimErrs    int        // сколько первых вызовов Claim вернут ошибку
+	hangDB       bool       // Claim и Sweep висят до отмены ctx, как запрос к зависшей БД
+	hangComplete bool       // Complete висит до отмены ctx или закрытия unblock
+	lostLease    bool       // Complete сообщает, что аренду перехватили
+	completeErr  error      // Complete возвращает эту ошибку
+	sweepStats   SweepStats // что возвращает Sweep
 	unblock      chan struct{}
 	limits       []int
 	completed    []completion
@@ -65,6 +68,12 @@ func (q *fakeQueue) Complete(ctx context.Context, t Task, o Outcome) (bool, erro
 	if err := ctx.Err(); err != nil { // как pgx: с отменённым контекстом запрос не выполняется
 		return false, err
 	}
+	if q.completeErr != nil {
+		return false, q.completeErr
+	}
+	if q.lostLease {
+		return false, nil
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.completed = append(q.completed, completion{task: t, outcome: o})
@@ -79,7 +88,7 @@ func (q *fakeQueue) Sweep(ctx context.Context, _ int) (SweepStats, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.sweeps++
-	return SweepStats{}, nil
+	return q.sweepStats, nil
 }
 
 func (q *fakeQueue) completions() []completion {
