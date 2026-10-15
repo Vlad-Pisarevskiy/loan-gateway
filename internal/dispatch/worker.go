@@ -7,7 +7,13 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry"
 )
 
 // DefaultBankTimeout — таймаут вызова банка, если он не задан в Config.BankTimeouts.
@@ -30,20 +36,27 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	BankTimeouts    map[string]time.Duration // таймаут вызова по коду банка
 	DBTimeout       time.Duration            // таймаут одного обращения к очереди; 0 — DefaultDBTimeout
+	Metrics         *telemetry.Metrics       // nil — метрики не пишутся
+	Tracer          trace.Tracer             // nil — спаны не создаются
 }
 
 // Worker забирает задачи из очереди, вызывает банки и записывает результаты.
 type Worker struct {
-	queue Queue
-	banks *bank.Registry
-	cfg   Config
-	log   *slog.Logger
-	rnd   func(int64) int64
+	queue  Queue
+	banks  *bank.Registry
+	cfg    Config
+	log    *slog.Logger
+	rnd    func(int64) int64
+	tracer trace.Tracer
 }
 
 // New создаёт воркер.
 func New(queue Queue, banks *bank.Registry, cfg Config, log *slog.Logger) *Worker {
-	return &Worker{queue: queue, banks: banks, cfg: cfg, log: log, rnd: rand.Int64N}
+	tracer := cfg.Tracer
+	if tracer == nil {
+		tracer = noop.NewTracerProvider().Tracer("")
+	}
+	return &Worker{queue: queue, banks: banks, cfg: cfg, log: log, rnd: rand.Int64N, tracer: tracer}
 }
 
 // Run обрабатывает очередь до отмены ctx. После отмены перестаёт брать задачи и ждёт текущие
@@ -87,6 +100,7 @@ func (w *Worker) poll(ctx, taskCtx context.Context, slots chan struct{}, wg *syn
 	tasks, err := w.queue.Claim(claimCtx, limit, w.cfg.Lease)
 	if err != nil {
 		if ctx.Err() == nil {
+			w.cfg.Metrics.QueueError(telemetry.OpClaim)
 			w.log.Error("claim failed", "error", err)
 		}
 		return
@@ -106,10 +120,12 @@ func (w *Worker) sweep(ctx context.Context) {
 	s, err := w.queue.Sweep(sweepCtx, w.cfg.MaxAttempts)
 	if err != nil {
 		if ctx.Err() == nil {
+			w.cfg.Metrics.QueueError(telemetry.OpSweep)
 			w.log.Error("sweep failed", "error", err)
 		}
 		return
 	}
+	w.cfg.Metrics.Swept(s.CallbackTimeouts, s.Requeued, s.LeaseExpired)
 	if s != (SweepStats{}) {
 		w.log.Info("sweep", "callback_timeouts", s.CallbackTimeouts, "requeued", s.Requeued, "lease_expired", s.LeaseExpired)
 	}
@@ -133,29 +149,69 @@ func (w *Worker) drain(wg *sync.WaitGroup, cancelTasks context.CancelFunc) {
 	}
 }
 
-// process вызывает банк и записывает результат. В лог попадают только идентификаторы — без ПДн.
+// process вызывает банк и записывает результат. В лог и спаны попадают только идентификаторы — без ПДн.
 func (w *Worker) process(ctx context.Context, t Task) {
+	w.cfg.Metrics.TaskStarted()
+	defer w.cfg.Metrics.TaskFinished()
+	// Родитель — серверный спан POST, создавший заявку: так все попытки видны в трейсе заявки.
+	ctx, span := w.tracer.Start(telemetry.WithTraceParent(ctx, t.TraceParent), "bank_request.process",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("application.id", t.Application.ID.String()),
+			attribute.String("bank_request.id", t.RequestID.String()),
+			attribute.String("bank.code", t.BankCode),
+			attribute.Int("attempt", t.Attempts),
+		))
+	defer span.End()
 	log := w.log.With("bank_request_id", t.RequestID, "application_id", t.Application.ID,
 		"bank_code", t.BankCode, "attempt", t.Attempts)
+
 	out := w.call(ctx, t)
+	span.SetAttributes(attribute.String("outcome", out.Kind.String()))
+	w.cfg.Metrics.BankCall(t.BankCode, out.Kind.String())
+
+	ok, err := w.save(ctx, t, out)
+	switch {
+	case err != nil:
+		span.SetStatus(codes.Error, err.Error())
+		w.cfg.Metrics.QueueError(telemetry.OpComplete)
+		log.ErrorContext(ctx, "save bank result failed", "outcome", out.Kind.String(), "error", err)
+	case !ok:
+		w.cfg.Metrics.LeaseLost()
+		log.WarnContext(ctx, "lease lost, bank result dropped", "outcome", out.Kind.String())
+	case out.Kind == OutcomeRetry || out.Kind == OutcomeFailed:
+		span.SetStatus(codes.Error, out.Error)
+		log.WarnContext(ctx, "bank request failed", "outcome", out.Kind.String(), "error", out.Error, "retry_after", out.RetryAfter.String())
+	default:
+		if out.Kind == OutcomeDecision {
+			w.cfg.Metrics.Decision(t.BankCode, out.Decision.Approved, telemetry.ViaSync)
+		}
+		log.InfoContext(ctx, "bank request processed", "outcome", out.Kind.String())
+	}
+}
+
+// save записывает результат в очередь под спаном queue.complete.
+func (w *Worker) save(ctx context.Context, t Task, out Outcome) (bool, error) {
 	// Запись не зависит от отмены задач: иначе ответ банка, полученный к ShutdownTimeout,
 	// пропадёт, а задача провисит в sending до конца аренды. Таймаут — на случай зависшей БД.
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.dbTimeout())
 	defer cancel()
+	saveCtx, span := w.tracer.Start(saveCtx, "queue.complete")
+	defer span.End()
 	ok, err := w.queue.Complete(saveCtx, t, out)
+	result := "saved"
 	switch {
 	case err != nil:
-		log.Error("save bank result failed", "outcome", out.Kind.String(), "error", err)
+		result = "error"
+		span.SetStatus(codes.Error, err.Error())
 	case !ok:
-		log.Warn("lease lost, bank result dropped", "outcome", out.Kind.String())
-	case out.Kind == OutcomeRetry || out.Kind == OutcomeFailed:
-		log.Warn("bank request failed", "outcome", out.Kind.String(), "error", out.Error, "retry_after", out.RetryAfter.String())
-	default:
-		log.Info("bank request processed", "outcome", out.Kind.String())
+		result = "lease_lost"
 	}
+	span.SetAttributes(attribute.String("result", result))
+	return ok, err
 }
 
-// call вызывает банк с таймаутом и превращает ответ в Outcome.
+// call вызывает банк с таймаутом под спаном bank.submit и превращает ответ в Outcome.
 func (w *Worker) call(ctx context.Context, t Task) Outcome {
 	b, ok := w.banks.Get(t.BankCode)
 	if !ok {
@@ -163,7 +219,27 @@ func (w *Worker) call(ctx context.Context, t Task) Outcome {
 	}
 	callCtx, cancel := context.WithTimeout(ctx, w.bankTimeout(t.BankCode))
 	defer cancel()
+	callCtx, span := w.tracer.Start(callCtx, "bank.submit", trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("bank.code", t.BankCode)))
+	defer span.End()
+	start := time.Now()
 	res, err := b.Submit(callCtx, bank.SubmitRequest{RequestID: t.RequestID, Application: t.Application})
+	out := w.outcome(t, res, err)
+	w.cfg.Metrics.BankCallDuration(t.BankCode, out.Kind.String(), time.Since(start))
+	span.SetAttributes(attribute.String("outcome", out.Kind.String()))
+	if err != nil {
+		errType := "temporary" // ошибка без класса тоже временная (раздел 6.2 спеки)
+		if bank.IsPermanent(err) {
+			errType = "permanent"
+		}
+		span.SetAttributes(attribute.String("error.type", errType))
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return out
+}
+
+// outcome превращает ответ банка в Outcome по разделу 8 спеки.
+func (w *Worker) outcome(t Task, res bank.SubmitResult, err error) Outcome {
 	if err != nil {
 		if bank.IsPermanent(err) || t.Attempts >= w.cfg.MaxAttempts {
 			return Outcome{Kind: OutcomeFailed, Error: err.Error()}
