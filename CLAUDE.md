@@ -22,6 +22,7 @@
 - `internal/httpapi` — HTTP API: заявки, вебхуки, health
 - `internal/mockbank` — заглушки банков: правила решений и диалекты
 - `internal/config` — конфигурация из env
+- `internal/telemetry` — метрики Prometheus, трейсинг OpenTelemetry, `trace_id` в логах (раздел 14 спеки); `telemetrytest` — помощники тестов
 - `test/e2e` — end-to-end тесты
 
 ## Соглашения
