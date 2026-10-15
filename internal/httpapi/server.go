@@ -9,9 +9,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/application"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry"
 )
 
 // ApplicationService — сценарии заявок; реализация — application.Service.
@@ -44,7 +47,9 @@ type Deps struct {
 	WebhookBanks   map[string]WebhookBank // асинхронные банки по коду
 	WebhookMaxSkew time.Duration
 	Log            *slog.Logger
-	Now            func() time.Time // по умолчанию time.Now
+	Now            func() time.Time   // по умолчанию time.Now
+	Metrics        *telemetry.Metrics // nil — метрики не пишутся
+	Tracer         trace.Tracer       // nil — спаны не создаются
 }
 
 type api struct {
@@ -55,6 +60,9 @@ type api struct {
 func NewHandler(d Deps) http.Handler {
 	if d.Now == nil {
 		d.Now = time.Now
+	}
+	if d.Tracer == nil {
+		d.Tracer = noop.NewTracerProvider().Tracer("")
 	}
 	a := &api{Deps: d}
 	routes := []struct {
@@ -70,7 +78,7 @@ func NewHandler(d Deps) http.Handler {
 	mux := http.NewServeMux()
 	allowed := map[string][]string{}
 	for _, rt := range routes {
-		mux.HandleFunc(rt.method+" "+rt.path, rt.handler)
+		mux.HandleFunc(rt.method+" "+rt.path, a.instrument(rt.path, rt.handler))
 		allowed[rt.path] = append(allowed[rt.path], rt.method)
 		if rt.method == http.MethodGet { // ServeMux отдаёт HEAD в GET-обработчик
 			allowed[rt.path] = append(allowed[rt.path], http.MethodHead)
@@ -78,9 +86,9 @@ func NewHandler(d Deps) http.Handler {
 	}
 	// Свои 404 и 405 у ServeMux — text/plain, а спека требует problem+json для всех ошибок.
 	// Шаблон без метода менее специфичен, чем с методом, поэтому ловит только чужие методы.
-	mux.HandleFunc("/", notFound)
+	mux.HandleFunc("/", a.instrument(telemetry.Other, notFound))
 	for path, methods := range allowed {
-		mux.Handle(path, methodNotAllowed(strings.Join(methods, ", ")))
+		mux.Handle(path, a.instrument(path, methodNotAllowed(strings.Join(methods, ", "))))
 	}
 	return mux
 }

@@ -9,8 +9,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/application"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry"
 )
 
 type createResponse struct {
@@ -62,11 +65,18 @@ func (a *api) createApplication(w http.ResponseWriter, r *http.Request) {
 	case errors.As(err, &verr):
 		writeProblem(w, http.StatusBadRequest, "Validation failed", "request body has invalid fields", verr.Fields...)
 	case errors.Is(err, application.ErrIdempotencyConflict):
+		a.Metrics.Application(telemetry.ApplicationConflict)
 		writeProblem(w, http.StatusConflict, "Idempotency key conflict", err.Error())
 	case err != nil:
-		a.Log.Error("create application failed", "error", err)
+		a.Log.ErrorContext(r.Context(), "create application failed", "error", err)
 		writeProblem(w, http.StatusInternalServerError, "Internal error", "")
 	default:
+		result := telemetry.ApplicationCreated
+		if v.Replayed {
+			result = telemetry.ApplicationReplayed
+		}
+		a.Metrics.Application(result)
+		trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("application.id", v.ID.String()))
 		writeJSON(w, http.StatusAccepted, createResponse{ID: v.ID, Status: v.Status()})
 	}
 }
@@ -78,12 +88,13 @@ func (a *api) getApplication(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Invalid id", "id must be a UUID")
 		return
 	}
+	trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("application.id", id.String()))
 	v, err := a.Applications.Get(r.Context(), id)
 	switch {
 	case errors.Is(err, application.ErrNotFound):
 		writeProblem(w, http.StatusNotFound, "Not found", "application not found")
 	case err != nil:
-		a.Log.Error("get application failed", "application_id", id, "error", err)
+		a.Log.ErrorContext(r.Context(), "get application failed", "application_id", id, "error", err)
 		writeProblem(w, http.StatusInternalServerError, "Internal error", "")
 	default:
 		writeJSON(w, http.StatusOK, toApplicationResponse(v))
