@@ -92,6 +92,9 @@ type View struct {
 	TermMonths int
 	CreatedAt  time.Time
 	Banks      []BankResult
+	// Replayed заполняет только Service.Create: заявка уже существовала, вызов — повтор
+	// с тем же ключом идемпотентности и тем же телом.
+	Replayed bool
 }
 
 // Status возвращает completed, если все запросы в банки финальные, иначе processing.
