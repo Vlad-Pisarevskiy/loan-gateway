@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/application"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry"
 )
 
 // Applications — реализация application.Repository.
@@ -50,14 +51,16 @@ func (r *Applications) Create(ctx context.Context, key string, hash []byte, app 
 		}
 		return id, stored, nil
 	}
+	// Контекст серверного спана POST — родитель всех попыток воркера (раздел 14.4 спеки).
+	traceParent := telemetry.TraceParent(ctx)
 	for _, code := range bankCodes {
 		reqID, err := uuid.NewV7()
 		if err != nil {
 			return uuid.Nil, nil, fmt.Errorf("generate id: %w", err)
 		}
 		_, err = tx.Exec(ctx, `
-			INSERT INTO bank_requests (id, application_id, bank_code, status)
-			VALUES ($1, $2, $3, 'queued')`, reqID, app.ID, code)
+			INSERT INTO bank_requests (id, application_id, bank_code, status, trace_parent)
+			VALUES ($1, $2, $3, 'queued', NULLIF($4, ''))`, reqID, app.ID, code, traceParent)
 		if err != nil {
 			return uuid.Nil, nil, fmt.Errorf("insert bank request: %w", err)
 		}

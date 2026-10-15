@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/application"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/dispatch"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry"
 )
 
 // Queue — очередь запросов в банки поверх таблицы bank_requests; реализует dispatch.Queue.
@@ -36,7 +38,7 @@ SET status = 'sending',
     updated_at = now()
 FROM picked, applications AS a
 WHERE br.id = picked.id AND a.id = br.application_id
-RETURNING br.id, br.bank_code, br.attempts,
+RETURNING br.id, br.bank_code, br.attempts, COALESCE(br.trace_parent, ''),
           a.id, a.full_name, a.birth_date, a.phone, a.monthly_income, a.employment_type, a.amount, a.term_months`
 
 // Claim атомарно переводит до limit готовых задач в sending с арендой lease.
@@ -53,7 +55,7 @@ func (q *Queue) Claim(ctx context.Context, limit int, lease time.Duration) ([]di
 			employment string
 		)
 		a := &t.Application
-		if err := rows.Scan(&t.RequestID, &t.BankCode, &t.Attempts,
+		if err := rows.Scan(&t.RequestID, &t.BankCode, &t.Attempts, &t.TraceParent,
 			&a.ID, &a.FullName, &a.BirthDate, &a.Phone, &a.MonthlyIncome, &employment, &a.Amount, &a.TermMonths); err != nil {
 			return nil, fmt.Errorf("scan claimed task: %w", err)
 		}
@@ -138,15 +140,15 @@ func (q *Queue) Sweep(ctx context.Context, maxAttempts int) (dispatch.SweepStats
 	return s, nil
 }
 
-// ApplyCallback записывает решение из вебхука, если запрос ещё ждёт его.
-// Обновление и проверка существования — один SQL-оператор: оба видят один снимок данных.
-// Иначе вебхук, пришедший раньше сохранения external_id, мог бы получить Duplicate
-// вместо Unknown, и банк не повторил бы его.
-func (q *Queue) ApplyCallback(ctx context.Context, bankCode, externalID string, d application.Decision) (application.CallbackResult, error) {
+// ApplyCallback записывает решение из вебхука, если запрос ещё ждёт его, и возвращает id и
+// trace_parent применённого запроса. Обновление и проверка существования — один SQL-оператор:
+// оба видят один снимок данных. Иначе вебхук, пришедший раньше сохранения external_id, мог бы
+// получить Duplicate вместо Unknown, и банк не повторил бы его.
+func (q *Queue) ApplyCallback(ctx context.Context, bankCode, externalID string, d application.Decision) (application.CallbackApply, error) {
 	const (
 		guard = ` WHERE bank_code = $1 AND external_id = $2 AND status = 'waiting_callback'`
-		tail  = ` RETURNING 1)
-		SELECT EXISTS (SELECT 1 FROM upd),
+		tail  = ` RETURNING id, trace_parent)
+		SELECT (SELECT id FROM upd), COALESCE((SELECT trace_parent FROM upd), ''),
 		       EXISTS (SELECT 1 FROM bank_requests WHERE bank_code = $1 AND external_id = $2)`
 	)
 	query := `WITH upd AS (UPDATE bank_requests SET status = 'rejected', reject_reason = $3, updated_at = now()` + guard + tail
@@ -156,16 +158,59 @@ func (q *Queue) ApplyCallback(ctx context.Context, bankCode, externalID string, 
 			approved_term = $5, monthly_payment = $6, updated_at = now()` + guard + tail
 		args = []any{bankCode, externalID, d.Amount, d.RateBPS, d.TermMonths, d.MonthlyPayment}
 	}
-	var updated, exists bool
-	if err := q.pool.QueryRow(ctx, query, args...).Scan(&updated, &exists); err != nil {
-		return 0, fmt.Errorf("apply callback: %w", err)
+	var (
+		id          *uuid.UUID // NULL — ничего не обновлено
+		traceParent string
+		exists      bool
+	)
+	if err := q.pool.QueryRow(ctx, query, args...).Scan(&id, &traceParent, &exists); err != nil {
+		return application.CallbackApply{}, fmt.Errorf("apply callback: %w", err)
 	}
 	switch {
-	case updated:
-		return application.CallbackApplied, nil
+	case id != nil:
+		return application.CallbackApply{Result: application.CallbackApplied, RequestID: *id, TraceParent: traceParent}, nil
 	case exists:
-		return application.CallbackDuplicate, nil
+		return application.CallbackApply{Result: application.CallbackDuplicate}, nil
 	default:
-		return application.CallbackUnknown, nil
+		return application.CallbackApply{Result: application.CallbackUnknown}, nil
 	}
+}
+
+// statsCountsSQL считает незавершённые запросы по банкам. Три ветки вместо status IN (...):
+// каждая совпадает с предикатом своего частичного индекса (раздел 7 спеки).
+const statsCountsSQL = `
+SELECT bank_code, 'queued', count(*) FROM bank_requests WHERE status = 'queued' GROUP BY bank_code
+UNION ALL
+SELECT bank_code, 'sending', count(*) FROM bank_requests WHERE status = 'sending' GROUP BY bank_code
+UNION ALL
+SELECT bank_code, 'waiting_callback', count(*) FROM bank_requests WHERE status = 'waiting_callback' GROUP BY bank_code
+ORDER BY 1, 2`
+
+// Stats возвращает состояние незавершённых запросов для gauge-метрик (раздел 14.2 спеки).
+func (q *Queue) Stats(ctx context.Context) (telemetry.QueueStats, error) {
+	var s telemetry.QueueStats
+	rows, err := q.pool.Query(ctx, statsCountsSQL)
+	if err != nil {
+		return s, fmt.Errorf("queue counts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var c telemetry.QueueCount
+		if err := rows.Scan(&c.Bank, &c.Status, &c.Count); err != nil {
+			return s, fmt.Errorf("scan queue count: %w", err)
+		}
+		s.Counts = append(s.Counts, c)
+	}
+	if err := rows.Err(); err != nil {
+		return s, fmt.Errorf("read queue counts: %w", err)
+	}
+	var seconds float64
+	err = q.pool.QueryRow(ctx, `
+		SELECT COALESCE(EXTRACT(EPOCH FROM now() - min(next_attempt_at)), 0)::float8
+		FROM bank_requests WHERE status = 'queued' AND next_attempt_at <= now()`).Scan(&seconds)
+	if err != nil {
+		return s, fmt.Errorf("oldest queued age: %w", err)
+	}
+	s.OldestAge = time.Duration(seconds * float64(time.Second))
+	return s, nil
 }

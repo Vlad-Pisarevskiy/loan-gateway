@@ -1,6 +1,7 @@
 package postgres_test
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/dispatch"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/store/postgres"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/store/postgres/pgtest"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry/telemetrytest"
 )
 
 var approved = application.Decision{Approved: true, Amount: 30_000_000, RateBPS: 1590, TermMonths: 24, MonthlyPayment: 1_467_460}
@@ -184,7 +187,7 @@ func TestCompleteAcceptedThenCallback(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ApplyCallback: %v", err)
 		}
-		return res
+		return res.Result
 	}
 	if res := apply("w-1", approved); res != application.CallbackApplied {
 		t.Fatalf("first callback = %d, want applied", res)
@@ -207,8 +210,8 @@ func TestCallbackWithRejection(t *testing.T) {
 	complete(t, q, claim(t, q, 1)[0], dispatch.Outcome{Kind: dispatch.OutcomeAccepted, ExternalID: "w-2", CallbackTimeout: time.Minute})
 
 	res, err := q.ApplyCallback(t.Context(), "westbank", "w-2", application.Decision{RejectReason: "insufficient_income"})
-	if err != nil || res != application.CallbackApplied {
-		t.Fatalf("ApplyCallback = %d, %v", res, err)
+	if err != nil || res.Result != application.CallbackApplied {
+		t.Fatalf("ApplyCallback = %+v, %v", res, err)
 	}
 	b := result(t, pool, app.ID, "westbank")
 	if b.Status != application.RequestRejected || b.Decision.RejectReason != "insufficient_income" {
@@ -336,10 +339,90 @@ func TestCallbackBeforeExternalIDIsUnknown(t *testing.T) {
 	claim(t, q, 1)
 
 	res, err := q.ApplyCallback(t.Context(), "westbank", "w-early", approved)
-	if err != nil || res != application.CallbackUnknown {
-		t.Fatalf("ApplyCallback = %d, %v, want unknown", res, err)
+	if err != nil || res.Result != application.CallbackUnknown {
+		t.Fatalf("ApplyCallback = %+v, %v, want unknown", res, err)
 	}
 	if s := result(t, pool, app.ID, "westbank").Status; s != application.RequestSending {
 		t.Fatalf("status = %s, want sending", s)
+	}
+}
+
+// seedTraced создаёт заявку в контексте спана и возвращает её traceparent.
+func seedTraced(t *testing.T, pool *pgxpool.Pool, codes ...string) (application.Application, string) {
+	t.Helper()
+	tracer, _ := telemetrytest.Tracer()
+	ctx, span := tracer.Start(t.Context(), "POST /v1/applications")
+	defer span.End()
+	app := newApp()
+	if _, _, err := postgres.NewApplications(pool).Create(ctx, app.ID.String(), []byte("h"), app, codes); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	return app, telemetry.TraceParent(ctx)
+}
+
+func TestClaimReturnsTraceParent(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	_, tp := seedTraced(t, pool, "northbank")
+	task := claim(t, postgres.NewQueue(pool), 1)[0]
+	if task.TraceParent != tp {
+		t.Fatalf("TraceParent = %q, want %q", task.TraceParent, tp)
+	}
+}
+
+func TestApplyCallbackReturnsRequestAndTraceParent(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	q := postgres.NewQueue(pool)
+	_, tp := seedTraced(t, pool, "westbank")
+	task := claim(t, q, 1)[0]
+	complete(t, q, task, dispatch.Outcome{Kind: dispatch.OutcomeAccepted, ExternalID: "w-tp", CallbackTimeout: time.Minute})
+
+	res, err := q.ApplyCallback(t.Context(), "westbank", "w-tp", approved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := application.CallbackApply{Result: application.CallbackApplied, RequestID: task.RequestID, TraceParent: tp}
+	if res != want {
+		t.Fatalf("ApplyCallback = %+v, want %+v", res, want)
+	}
+	res, err = q.ApplyCallback(t.Context(), "westbank", "w-tp", approved)
+	if err != nil || res != (application.CallbackApply{Result: application.CallbackDuplicate}) {
+		t.Fatalf("repeated ApplyCallback = %+v, %v; want duplicate without request data", res, err)
+	}
+}
+
+func TestQueueStats(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	q := postgres.NewQueue(pool)
+	empty, err := q.Stats(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty.Counts) != 0 || empty.OldestAge != 0 {
+		t.Fatalf("empty queue stats = %+v", empty)
+	}
+
+	seed(t, pool, "eastbank", "northbank", "westbank")
+	later := seed(t, pool, "eastbank")
+	done := seed(t, pool, "northbank")
+	exec(t, pool, `UPDATE bank_requests SET status = 'sending', locked_until = now() + interval '1 minute' WHERE bank_code = 'westbank'`)
+	exec(t, pool, `UPDATE bank_requests SET next_attempt_at = now() + interval '1 hour' WHERE application_id = $1`, later.ID)
+	exec(t, pool, `UPDATE bank_requests SET status = 'approved' WHERE application_id = $1`, done.ID)
+	exec(t, pool, `UPDATE bank_requests SET next_attempt_at = now() - interval '30 seconds' WHERE bank_code = 'northbank' AND status = 'queued'`)
+
+	s, err := q.Stats(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []telemetry.QueueCount{
+		{Bank: "eastbank", Status: "queued", Count: 2},
+		{Bank: "northbank", Status: "queued", Count: 1},
+		{Bank: "westbank", Status: "sending", Count: 1},
+	}
+	if !reflect.DeepEqual(s.Counts, want) {
+		t.Fatalf("counts = %+v, want %+v", s.Counts, want)
+	}
+	// Самая старая готовая — northbank (30 с назад); eastbank второй заявки в будущем и не считается.
+	if s.OldestAge < 30*time.Second || s.OldestAge > 40*time.Second {
+		t.Fatalf("oldest age = %s, want about 30s", s.OldestAge)
 	}
 }

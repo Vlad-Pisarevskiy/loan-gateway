@@ -29,9 +29,9 @@ type fakeCallbacks struct {
 	calls  []callbackCall
 }
 
-func (f *fakeCallbacks) ApplyCallback(_ context.Context, bankCode, externalID string, d application.Decision) (application.CallbackResult, error) {
+func (f *fakeCallbacks) ApplyCallback(_ context.Context, bankCode, externalID string, d application.Decision) (application.CallbackApply, error) {
 	f.calls = append(f.calls, callbackCall{bankCode: bankCode, externalID: externalID, decision: d})
-	return f.result, f.err
+	return application.CallbackApply{Result: f.result}, f.err
 }
 
 // testCallbackHandler разбирает тело вида {"id":"...","approved":true,"reason":"..."}.

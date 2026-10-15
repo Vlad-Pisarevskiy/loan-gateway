@@ -54,7 +54,7 @@ func (a *api) bankWebhook(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Internal error", "")
 		return
 	}
-	switch res {
+	switch res.Result {
 	case application.CallbackApplied:
 		log.Info("webhook applied")
 		writeJSON(w, http.StatusOK, webhookResponse{Result: "applied"})
