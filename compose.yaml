@@ -1,0 +1,76 @@
+# Локальное окружение: PostgreSQL, миграции, API, воркер и заглушки банков.
+x-app: &app
+  image: loan-gateway:dev
+  build: .
+
+x-gateway-env: &gateway-env
+  DATABASE_URL: postgres://gateway:gateway@postgres:5432/gateway?sslmode=disable
+  LOG_LEVEL: info
+  BANK_NORTHBANK_URL: http://northbank:8090
+  BANK_EASTBANK_URL: http://eastbank:8090
+  BANK_WESTBANK_URL: http://westbank:8090
+  BANK_WESTBANK_WEBHOOK_SECRET: local-west-secret
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: gateway
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U gateway -d gateway"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  migrate:
+    <<: *app
+    command: ["gateway", "migrate"]
+    environment: *gateway-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["gateway", "api"]
+    stop_grace_period: 30s # SHUTDOWN_TIMEOUT (20s) и запись результатов; по умолчанию Docker ждёт 10s
+    environment: *gateway-env
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *app
+    command: ["gateway", "worker"]
+    stop_grace_period: 30s # SHUTDOWN_TIMEOUT (20s) и запись результатов; по умолчанию Docker ждёт 10s
+    environment: *gateway-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  northbank:
+    <<: *app
+    command: ["mockbank"]
+    environment:
+      MOCKBANK_DIALECT: north
+
+  eastbank:
+    <<: *app
+    command: ["mockbank"]
+    environment:
+      MOCKBANK_DIALECT: east
+      MOCKBANK_LATENCY: 1s
+      MOCKBANK_FAIL_FIRST: "2"
+
+  westbank:
+    <<: *app
+    command: ["mockbank"]
+    environment:
+      MOCKBANK_DIALECT: west
+      MOCKBANK_CALLBACK_URL: http://api:8080/v1/webhooks/banks/westbank
+      MOCKBANK_CALLBACK_SECRET: local-west-secret
+      MOCKBANK_CALLBACK_DELAY: 5s
