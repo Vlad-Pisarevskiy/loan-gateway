@@ -22,6 +22,7 @@ type Bank struct {
 type Gateway struct {
 	DatabaseURL     string
 	HTTPAddr        string
+	MetricsAddr     string
 	LogLevel        slog.Level
 	ShutdownTimeout time.Duration
 	PollInterval    time.Duration
@@ -44,6 +45,7 @@ func LoadGateway(getenv func(string) string, knownBanks []string) (Gateway, erro
 	cfg := Gateway{
 		DatabaseURL:     r.required("DATABASE_URL"),
 		HTTPAddr:        r.str("HTTP_ADDR", ":8080"),
+		MetricsAddr:     r.str("METRICS_ADDR", ":9100"),
 		LogLevel:        r.logLevel("LOG_LEVEL", slog.LevelInfo),
 		ShutdownTimeout: r.positiveDuration("SHUTDOWN_TIMEOUT", 20*time.Second),
 		PollInterval:    r.positiveDuration("WORKER_POLL_INTERVAL", 500*time.Millisecond),

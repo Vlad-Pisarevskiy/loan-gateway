@@ -25,6 +25,7 @@ func TestLoadGatewayDefaults(t *testing.T) {
 	want := Gateway{
 		DatabaseURL:     "postgres://db",
 		HTTPAddr:        ":8080",
+		MetricsAddr:     ":9100",
 		LogLevel:        slog.LevelInfo,
 		ShutdownTimeout: 20 * time.Second,
 		PollInterval:    500 * time.Millisecond,
@@ -47,6 +48,7 @@ func TestLoadGatewayDefaults(t *testing.T) {
 func TestLoadGatewayOverrides(t *testing.T) {
 	cfg, err := LoadGateway(env(map[string]string{
 		"DATABASE_URL":                 "postgres://db",
+		"METRICS_ADDR":                 ":9200",
 		"HTTP_ADDR":                    ":9090",
 		"LOG_LEVEL":                    "debug",
 		"WORKER_CONCURRENCY":           "3",
@@ -59,7 +61,7 @@ func TestLoadGatewayOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HTTPAddr != ":9090" || cfg.LogLevel != slog.LevelDebug || cfg.Concurrency != 3 ||
+	if cfg.HTTPAddr != ":9090" || cfg.MetricsAddr != ":9200" || cfg.LogLevel != slog.LevelDebug || cfg.Concurrency != 3 ||
 		cfg.MaxAttempts != 7 || cfg.CallbackTimeout != 30*time.Second {
 		t.Fatalf("overrides not applied: %+v", cfg)
 	}

@@ -2,19 +2,27 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/application"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/config"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/httpapi"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/store/postgres"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry"
 )
 
-// runAPI обслуживает HTTP API до отмены ctx, затем корректно останавливает сервер.
+// runAPI обслуживает HTTP API до отмены ctx, затем корректно останавливает сервер, сервер
+// метрик и трейсинг в пределах SHUTDOWN_TIMEOUT.
 func runAPI(ctx context.Context, cfg config.Gateway, log *slog.Logger) error {
 	reg, hooks, err := buildBanks(cfg)
+	if err != nil {
+		return err
+	}
+	shutdownTracing, err := telemetry.SetupTracing(ctx, os.Getenv, "gateway-api", log)
 	if err != nil {
 		return err
 	}
@@ -24,6 +32,7 @@ func runAPI(ctx context.Context, cfg config.Gateway, log *slog.Logger) error {
 	}
 	defer pool.Close()
 
+	metricsReg := telemetry.NewRegistry()
 	handler := httpapi.NewHandler(httpapi.Deps{
 		Applications:   application.NewService(postgres.NewApplications(pool), reg.Codes(), time.Now),
 		Callbacks:      postgres.NewQueue(pool),
@@ -31,21 +40,25 @@ func runAPI(ctx context.Context, cfg config.Gateway, log *slog.Logger) error {
 		WebhookBanks:   hooks,
 		WebhookMaxSkew: cfg.WebhookMaxSkew,
 		Log:            log,
+		Metrics:        telemetry.NewMetrics(metricsReg),
+		Tracer:         telemetry.Tracer(),
 	})
 	srv := newAPIServer(cfg.HTTPAddr, handler)
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	log.Info("api started", "addr", cfg.HTTPAddr, "banks", reg.Codes())
+	metricsErr, stopMetrics := startMetrics(cfg.MetricsAddr, metricsReg)
+	log.Info("api started", "addr", cfg.HTTPAddr, "metrics_addr", cfg.MetricsAddr, "banks", reg.Codes())
 
+	var runErr error
 	select {
-	case err := <-errCh:
-		return err
+	case runErr = <-errCh:
+	case runErr = <-metricsErr:
 	case <-ctx.Done():
 	}
 	log.Info("api stopping")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	return errors.Join(runErr, srv.Shutdown(shutdownCtx), stopMetrics(shutdownCtx), shutdownTracing(shutdownCtx))
 }
 
 // newAPIServer — HTTP-сервер API. Лимит тела ограничивает размер, но не время: без ReadTimeout
