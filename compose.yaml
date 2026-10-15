@@ -100,6 +100,8 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      # Jaeger v2 отдаёт только API v3; без флага источник Jaeger ходит в старый /api/services и получает 404.
+      GF_FEATURE_TOGGLES_ENABLE: jaegerEnableGrpcEndpoint
     volumes:
       - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
