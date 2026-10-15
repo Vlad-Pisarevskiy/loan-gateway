@@ -1,6 +1,7 @@
 # Loan Gateway — спецификация MVP
 
-Дата: 2026-10-13 · Статус: на ревью · Релиз: v0.1.0
+Дата: 2026-10-13, обновлена 2026-10-15 · Статус: v0.1.0 реализована, раздел 14 на ревью ·
+Релизы: v0.1.0 (MVP), v0.2.0 (наблюдаемость, раздел 14)
 
 ## 1. Контекст и цель
 
@@ -38,11 +39,13 @@ Loan Gateway — сервис-шлюз: принимает заявку на к�
 идемпотентность (клиент → шлюз и шлюз → банк), чтение результата, заглушки банков,
 тесты трёх уровней, CI, docker compose, демо-скрипт.
 
+**Входит в v0.2.0:** метрики Prometheus, трейсинг OpenTelemetry, дашборд Grafana и
+алерты (раздел 14).
+
 **Не входит** (кандидаты в задачи после MVP):
 - подключение реальных банков-партнёров;
 - уведомление клиента вебхуком (в MVP клиент опрашивает `GET`);
 - фильтрация банков по критериям до отправки;
-- метрики Prometheus, трейсинг OpenTelemetry;
 - другие продукты (кредитная карта и т. д.);
 - аутентификация клиентов API, шифрование ПДн в БД;
 - список и поиск заявок;
@@ -75,12 +78,16 @@ internal/dispatch/        воркер, backoff, чистильщик
 internal/store/postgres/  репозитории, миграции (embed + goose)
 internal/httpapi/         роутинг, хендлеры, problem+json, проверка HMAC
 internal/mockbank/        логика заглушки: правила решений, диалекты, отправка вебхука
+internal/telemetry/       метрики, трейсинг, обёртка slog (v0.2.0, раздел 14)
 test/e2e/                 end-to-end тесты
 scripts/demo.sh           демо через curl + jq
+deploy/observability/     конфиги Prometheus, алертов и Grafana (v0.2.0)
 ```
 
 **Зависимости:** `github.com/jackc/pgx/v5`, `github.com/pressly/goose/v3`,
 `github.com/google/uuid`, `github.com/testcontainers/testcontainers-go` (модуль postgres).
+С v0.2.0 — `github.com/prometheus/client_golang` и `go.opentelemetry.io/otel` (API, SDK,
+экспортёр OTLP/HTTP), раздел 14.
 HTTP — стандартный `net/http` (роутинг по шаблонам Go 1.22+), логи — `log/slog`.
 Новые зависимости — только при явной необходимости.
 
@@ -234,6 +241,8 @@ queued → sending → approved | rejected                  (синхронны�
 
 - `GET /healthz` — `200`, если процесс жив.
 - `GET /readyz` — `200`, если `ping` БД успешен, иначе `503`.
+- `GET /metrics` — метрики Prometheus; отдаётся не на `HTTP_ADDR`, а на отдельном
+  адресе `METRICS_ADDR` у `api` и у `worker` (v0.2.0, раздел 14).
 
 ## 6. Интеграция с банками
 
@@ -413,6 +422,9 @@ CREATE INDEX bank_requests_waiting_idx ON bank_requests (callback_deadline) WHER
 `embed`; `gateway migrate` применяет их, `api` и `worker` миграции не запускают.
 Каждое обновление `bank_requests` выставляет `updated_at = now()`.
 
+Миграция v0.2.0 добавляет колонку `bank_requests.trace_parent text` (nullable) — контекст
+трейса заявки в формате W3C `traceparent` (раздел 14.4).
+
 ## 8. Воркер
 
 **Цикл.** Раз в `WORKER_POLL_INTERVAL` воркер забирает до `min(WORKER_BATCH_SIZE,
@@ -488,15 +500,24 @@ RETURNING …;
 | `BANK_<CODE>_URL` | — | базовый URL банка; банк включён, если задан |
 | `BANK_<CODE>_TIMEOUT` | `5s` | таймаут вызова банка |
 | `BANK_<CODE>_WEBHOOK_SECRET` | — | секрет HMAC (обязателен для асинхронных банков) |
+| `METRICS_ADDR` | `:9100` | адрес `GET /metrics` у `api` и `worker` (v0.2.0) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | адрес приёма трейсов OTLP/HTTP; не задан — трейсинг выключен (v0.2.0) |
+| `OTEL_SERVICE_NAME` | `gateway-api` / `gateway-worker` | имя сервиса в трейсах (v0.2.0) |
+| `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | семплирование трейсов (v0.2.0) |
 
 `<CODE>` — `NORTHBANK`, `EASTBANK`, `WESTBANK`. Ошибка старта, если
 `WORKER_LEASE` ≤ максимального `BANK_<CODE>_TIMEOUT`.
+
+Переменные `OTEL_*` читает OpenTelemetry SDK, а не `internal/config`; остальные
+стандартные переменные `OTEL_*` тоже действуют.
 
 ## 10. Логи и безопасность
 
 - `log/slog`, JSON в stdout. Поля по контексту: `application_id`, `bank_request_id`,
   `bank_code`, `attempt`.
 - ФИО, телефон, дату рождения и тела запросов к банкам в логи не пишем.
+- С v0.2.0 записи с контекстом содержат `trace_id` и `span_id` (раздел 14.5); в метках
+  метрик и атрибутах спанов ПДн нет (14.2, 14.4).
 - Вебхуки защищены HMAC и окном времени (5.3); сравнение подписи — `hmac.Equal`.
 - Секреты — только из env, в репозитории только значения для локального compose.
 
@@ -510,6 +531,7 @@ RETURNING …;
 
 - Интеграционные и e2e-тесты пропускаются при `go test -short` (`testing.Short()`).
 - Полный прогон — `go test -race ./...`, нужен Docker.
+- Тесты наблюдаемости (v0.2.0) — раздел 14.6.
 
 ## 12. Запуск и демо
 
@@ -521,7 +543,13 @@ RETURNING …;
 - `eastbank` (`MOCKBANK_LATENCY=1s`, `MOCKBANK_FAIL_FIRST=2`);
 - `westbank` (`MOCKBANK_CALLBACK_URL=http://api:8080/v1/webhooks/banks/westbank`,
   `MOCKBANK_CALLBACK_DELAY=5s`); `MOCKBANK_CALLBACK_SECRET` совпадает с
-  `BANK_WESTBANK_WEBHOOK_SECRET` у `api`.
+  `BANK_WESTBANK_WEBHOOK_SECRET` у `api`;
+- с v0.2.0: `prometheus` (порт 9090; опрашивает `api:9100` и `worker:9100` раз в 5 с,
+  правила алертов), `jaeger` (Jaeger v2 all-in-one: UI на порту 16686, приём OTLP/HTTP
+  на 4318 только внутри сети compose), `grafana` (порт 3000; источники данных и дашборд
+  подключаются provisioning-ом, анонимный вход — только для локального стенда). У `api`
+  и `worker` заданы `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318` и
+  `OTEL_SERVICE_NAME`.
 
 Образ — многостадийный `Dockerfile` (сборка на `golang:1.26`, финальный образ —
 `gcr.io/distroless/static`), оба бинарника в одном образе.
@@ -529,7 +557,9 @@ RETURNING …;
 **Makefile:** `test` (все тесты с `-race`), `test-short`, `lint`, `up`, `down`, `demo`.
 
 **`scripts/demo.sh`:** отправляет заявку с `Idempotency-Key`, раз в секунду опрашивает
-`GET` до `completed` (не дольше 60 с), печатает результат через `jq`.
+`GET` до `completed` (не дольше 60 с), печатает результат через `jq`. С v0.2.0 затем
+печатает ссылки на дашборд Grafana и на поиск трейса заявки в Jaeger по тегу
+`application.id`.
 
 ## 13. Процесс разработки
 
@@ -545,7 +575,8 @@ RETURNING …;
   в GitHub вручную).
 - Коммиты — Conventional Commits на английском (`feat:`, `fix:`, `test:`, `docs:`,
   `chore:`, `ci:`).
-- MVP выходит как `release/0.1.0` → тег `v0.1.0`.
+- MVP выходит как `release/0.1.0` → тег `v0.1.0`; наблюдаемость — `release/0.2.0` →
+  `v0.2.0`.
 
 ### 13.2 CI
 
@@ -583,10 +614,149 @@ RETURNING …;
    Обе задачи трогают `compose.yaml`, реестр банков и выбор диалекта в заглушке;
    конфликты в этих местах разрешаются при merge второго PR.
 3. **Релиз.** Раздел README «Как разрабатывался проект», `release/0.1.0` → `v0.1.0`.
-4. **После MVP** — задачи из «Не входит» (раздел 2), пока позволяет бюджет.
+4. **v0.2.0 — наблюдаемость** (раздел 14). Пакет `internal/telemetry` и хранилище —
+   локально; `httpapi`, `dispatch` и инфраструктура compose — три параллельные облачные
+   сессии; сборка в `cmd/gateway`, e2e и релиз `release/0.2.0` → `v0.2.0` — локально.
+5. **Дальше** — задачи из «Не входит» (раздел 2), пока позволяет бюджет.
 
 ### 13.5 Журнал разработки
 
 `docs/dev-log.md` — таблица, строка на каждую завершённую задачу:
 дата · задача · где (локально / облако) · PR · замечаний ревью (исправлено / всего) ·
 стоимость сессии. Из журнала берутся цифры для README.
+
+## 14. Наблюдаемость (v0.2.0)
+
+Метрики Prometheus, трейсинг OpenTelemetry, дашборд Grafana и алерты. По метрикам видно
+состояние шлюза и каждого банка, по трейсу — путь одной заявки через API, очередь,
+воркер, банк и вебхук.
+
+### 14.1 Стек
+
+- **Метрики** — `github.com/prometheus/client_golang`. `api` и `worker` отдают
+  `GET /metrics` на отдельном адресе `METRICS_ADDR` (по умолчанию `:9100`), не на
+  публичном порту API; `migrate` метрик не отдаёт.
+- **Трейсы** — OpenTelemetry SDK (`go.opentelemetry.io/otel`, SDK, экспортёр OTLP/HTTP),
+  отправка напрямую в Jaeger v2, без OpenTelemetry Collector. Пропагатор — W3C Trace
+  Context.
+- **Хранение и UI** — Prometheus, Jaeger и Grafana в compose (раздел 12).
+- **Пакет `internal/telemetry`** — описания метрик, настройка трейсинга, обёртка `slog`,
+  преобразование контекста трейса в строку `traceparent` и обратно. `httpapi` и
+  `dispatch` получают метрики и трейсер параметрами; `nil` вместо метрик — запись
+  выключена (так работают тесты, которым метрики не нужны).
+
+### 14.2 Метрики
+
+Префикс — `loangw_`. Метки — только из ограниченных наборов значений (шаблон маршрута,
+код банка, исход); идентификаторов и ПДн в метках нет. Гистограммы — стандартные бакеты
+`client_golang` (`prometheus.DefBuckets`, от 5 мс до 10 с).
+
+| Метрика | Тип | Метки | Процесс | Когда меняется |
+|---|---|---|---|---|
+| `loangw_http_requests_total` | counter | `route`, `method`, `code` | api | каждый ответ API; `route` — шаблон из таблицы маршрутов (`/v1/applications/{id}`), для неизвестных путей — `other` |
+| `loangw_http_request_duration_seconds` | histogram | `route`, `method` | api | то же |
+| `loangw_applications_total` | counter | `result` = `created` \| `replayed` \| `conflict` | api | создание заявки; повтор с тем же ключом и телом; тот же ключ с другим телом (`409`) |
+| `loangw_webhooks_total` | counter | `bank`, `result` = `applied` \| `duplicate` \| `unknown` \| `unauthorized` \| `bad_body` \| `unknown_bank` \| `error` | api | каждый вебхук (5.3): решение применено; запрос не ждёт вебхук; неизвестный `external_id`; подпись не прошла (`401`); тело не прочитано или не разобрано; банк не принимает вебхуки (`bank="other"`); внутренняя ошибка (`500`) |
+| `loangw_bank_calls_total` | counter | `bank`, `outcome` = `decision` \| `accepted` \| `retry` \| `failed` | worker | каждая обработанная задача (исход из раздела 8, шаг 3) |
+| `loangw_bank_call_duration_seconds` | histogram | `bank`, `outcome` | worker | длительность вызова `Submit`, без записи результата в БД |
+| `loangw_bank_decisions_total` | counter | `bank`, `status` = `approved` \| `rejected`, `via` = `sync` \| `webhook` | worker, api | решение записано: синхронное — воркером, из вебхука — `api` |
+| `loangw_worker_tasks_in_flight` | gauge | — | worker | число вызовов банков, идущих прямо сейчас |
+| `loangw_queue_errors_total` | counter | `op` = `claim` \| `complete` \| `sweep` \| `stats` | worker | ошибка обращения к очереди |
+| `loangw_lease_lost_total` | counter | — | worker | `Complete` сообщил, что аренду перехватили |
+| `loangw_sweeper_actions_total` | counter | `action` = `callback_timeout` \| `requeued` \| `lease_expired` | worker | по итогам прохода чистильщика |
+| `loangw_bank_requests` | gauge | `bank`, `status` = `queued` \| `sending` \| `waiting_callback` | worker | читается из БД при каждом опросе Prometheus |
+| `loangw_queue_oldest_age_seconds` | gauge | — | worker | `now() − min(next_attempt_at)` среди `queued` с `next_attempt_at <= now()`; `0`, если таких нет |
+
+Gauge из БД воркер считает при опросе одним запросом по незавершённым статусам
+(частичные индексы раздела 7) с тем же таймаутом, что и остальные обращения воркера к
+БД. При ошибке эти gauge не отдаются, а растёт `loangw_queue_errors_total{op="stats"}`.
+При нескольких экземплярах воркера их значения совпадают — в дашборде и алертах берётся
+`max`. Метрики рантайма Go и процесса (`go_*`, `process_*`) — стандартные коллекторы
+`client_golang`.
+
+### 14.3 Алерты и дашборд
+
+Правила лежат в `deploy/observability/alerts.yml` и вычисляются Prometheus. Alertmanager
+не входит: срабатывания видны в UI Prometheus и в Grafana.
+
+| Алерт | Условие | Сколько держится |
+|---|---|---|
+| `TargetDown` | `up{job=~"api\|worker"} == 0` | 1 мин |
+| `BankErrorRateHigh` | по банку: доля `outcome` = `retry` или `failed` в `rate(loangw_bank_calls_total[5m])` больше 0,2 | 5 мин |
+| `QueueBacklog` | `max(loangw_queue_oldest_age_seconds) > 60` | 2 мин |
+| `CallbackTimeouts` | `increase(loangw_sweeper_actions_total{action="callback_timeout"}[10m]) > 0` | сразу |
+
+eastbank в compose намеренно нестабилен (`MOCKBANK_FAIL_FIRST=2`: две попытки из трёх —
+`retry`), поэтому после демо `BankErrorRateHigh` по eastbank может ненадолго сработать —
+это ожидаемо.
+
+Дашборд «Loan Gateway» — JSON в `deploy/observability/grafana/`, подключается
+provisioning-ом вместе с источниками данных Prometheus и Jaeger. Панели: нагрузка и
+ошибки API по `route` и `code`; задержка вызовов банков p50/p95/p99 по банкам; исходы
+вызовов по банкам; решения по банкам; очередь по статусам и возраст самой старой задачи;
+вызовы в работе; действия чистильщика и результаты вебхуков.
+
+### 14.4 Трейсинг
+
+**Включение.** Трейсинг включён, если задан `OTEL_EXPORTER_OTLP_ENDPOINT` (или
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`); иначе работает no-op трейсер и ничего не
+отправляется. Переменные `OTEL_*` читает SDK (раздел 9). Спаны отправляются пакетами; при
+остановке процесс досылает их в пределах `SHUTDOWN_TIMEOUT`. Ошибки экспорта на обработку
+заявок не влияют.
+
+**Спаны:**
+
+| Спан | Вид | Процесс | Родитель | Атрибуты |
+|---|---|---|---|---|
+| `<METHOD> <route>`, например `POST /v1/applications` | server | api | входящий `traceparent` клиента, если есть; иначе корень | `http.request.method`, `http.route`, `http.response.status_code`; `application.id`, когда он известен |
+| `bank_request.process` | consumer | worker | контекст из `bank_requests.trace_parent`; пустой или невалидный — корень | `application.id`, `bank_request.id`, `bank.code`, `attempt`, `outcome` |
+| `bank.submit` | client | worker | `bank_request.process` | `bank.code`, `outcome`; при ошибке `error.type` = `temporary` \| `permanent` |
+| `queue.complete` | internal | worker | `bank_request.process` | `result` = `saved` \| `lease_lost` \| `error` |
+| `bank_request.callback` | internal | api | контекст из `bank_requests.trace_parent` | `bank_request.id`, `bank.code`, `decision.status`; ссылка (span link) на серверный спан вебхука |
+
+**Передача через очередь.** При создании заявки (5.1) в той же транзакции в
+`trace_parent` каждого `bank_request` записывается контекст текущего серверного спана в
+формате W3C `traceparent`. Каждая попытка воркера — отдельный `bank_request.process` в
+трейсе заявки, поэтому ретраи видны как последовательность попыток под одним `POST`.
+
+**Вебхук.** Банк контекст трейса не присылает, поэтому серверный спан вебхука начинает
+свой трейс. Если решение применено (5.3, шаг 4) и у запроса есть `trace_parent`, `api`
+создаёт `bank_request.callback` в трейсе заявки со ссылкой на спан вебхука; для этого
+применение вебхука возвращает `id` и `trace_parent` запроса. Для повторов, опозданий и
+ошибок спан в трейсе заявки не создаётся.
+
+**Ошибки.** Спан получает статус `Error` с текстом ошибки при ответе API `5xx`, при ошибке
+`Submit` и при ошибке записи результата. Тексты ошибок по разделу 10 не содержат ПДн.
+
+**Не трейсим:** вызовы банков не получают заголовок `traceparent` — это внешние партнёры;
+заглушки `mockbank`; захват задач и чистильщик — пакетные операции, их покрывают метрики;
+`/healthz` и `/readyz` учитываются в метриках, но спанов не создают; `/metrics` не
+инструментируется.
+
+**ПДн.** В атрибуты спанов попадают только идентификаторы, коды и статусы из таблицы
+выше; ФИО, телефон, дата рождения, суммы анкеты и тела запросов — никогда.
+
+### 14.5 Логи
+
+Обёртка над `slog.Handler` добавляет в запись `trace_id` и `span_id`, если в контексте
+записи есть валидный спан. Записи, связанные с запросом API и с задачей воркера, пишутся с
+контекстом (`InfoContext` и т. п.). По `trace_id` из лога трейс находится в Jaeger.
+
+### 14.6 Тестирование
+
+| Уровень | Что проверяет |
+|---|---|
+| **Юнит** | метрики через `prometheus/testutil`: каждый исход воркера увеличивает свой счётчик; `route` — шаблон маршрута, неизвестный путь → `other`; вебхук неизвестного банка → `bank="other"`. Трейсы через `tracetest.SpanRecorder`: родитель `bank_request.process` — сохранённый `traceparent`, невалидный `traceparent` → корневой спан. Контекст ↔ `traceparent` без потерь. Обёртка `slog` добавляет `trace_id` |
+| **Интеграционные** | миграция добавляет колонку; `Create` записывает `trace_parent`, `Claim` и применение вебхука возвращают его; запрос gauge-метрик очереди: числа по банкам и статусам, возраст самой старой готовой задачи, `0` при пустой очереди |
+| **E2E** | заявка в три банка: все её спаны в одном трейсе (`POST`, попытки каждого банка, `bank_request.callback` westbank со ссылкой на спан вебхука); ни один атрибут ни одного спана не содержит ФИО, телефон или дату рождения из анкеты; `/metrics` у `api` и `worker` отдаёт серии из 14.2 |
+
+Ручная проверка перед релизом: `make up && make demo`; в Prometheus обе цели `up`,
+дашборд в Grafana показывает данные, трейс заявки открывается в Jaeger по ссылке из демо.
+
+### 14.7 Критерии готовности v0.2.0
+
+1. `make up` поднимает систему вместе с Prometheus, Jaeger и Grafana; `make demo`
+   печатает решения трёх банков и ссылки на дашборд и трейс заявки; трейс содержит
+   попытки всех трёх банков и вебхук westbank.
+2. Тесты из 14.6 и все прежние, `go vet`, `golangci-lint` — зелёные локально и в CI.
+3. Спека, план и журнал обновлены; README описывает наблюдаемость.
