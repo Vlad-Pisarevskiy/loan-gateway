@@ -1,0 +1,84 @@
+{
+  "uid": "loan-gateway",
+  "title": "Loan Gateway",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "API: запросы в секунду по маршрутам и кодам",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (route, code) (rate(loangw_http_requests_total[1m]))", "legendFormat": "{{route}} {{code}}" }
+      ]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Задержка вызовов банков: p50, p95, p99",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.5, sum by (le, bank) (rate(loangw_bank_call_duration_seconds_bucket[5m])))", "legendFormat": "p50 {{bank}}" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le, bank) (rate(loangw_bank_call_duration_seconds_bucket[5m])))", "legendFormat": "p95 {{bank}}" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le, bank) (rate(loangw_bank_call_duration_seconds_bucket[5m])))", "legendFormat": "p99 {{bank}}" }
+      ]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Исходы вызовов банков",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (bank, outcome) (rate(loangw_bank_calls_total[5m]))", "legendFormat": "{{bank}} {{outcome}}" }
+      ]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Решения банков",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (bank, status, via) (increase(loangw_bank_decisions_total[5m]))", "legendFormat": "{{bank}} {{status}} ({{via}})" }
+      ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Очередь по статусам",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "max by (bank, status) (loangw_bank_requests)", "legendFormat": "{{bank}} {{status}}" }
+      ]
+    },
+    {
+      "id": 6, "type": "stat", "title": "Возраст самой старой готовой задачи",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "max(loangw_queue_oldest_age_seconds)" }
+      ]
+    },
+    {
+      "id": 7, "type": "stat", "title": "Вызовы банков в работе",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(loangw_worker_tasks_in_flight)" }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Чистильщик и вебхуки",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (action) (increase(loangw_sweeper_actions_total[5m]))", "legendFormat": "чистильщик: {{action}}" },
+        { "refId": "B", "expr": "sum by (bank, result) (increase(loangw_webhooks_total[5m]))", "legendFormat": "вебхук {{bank}}: {{result}}" }
+      ]
+    }
+  ]
+}

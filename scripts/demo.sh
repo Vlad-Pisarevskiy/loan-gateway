@@ -32,6 +32,10 @@ for _ in $(seq 1 60); do
   RESP=$(curl -sf "$API/v1/applications/$ID")
   if [ "$(jq -r .status <<<"$RESP")" = "completed" ]; then
     jq . <<<"$RESP"
+    TAGS=$(jq -rn --arg id "$ID" '{"application.id": $id} | tojson | @uri')
+    echo
+    echo "Дашборд: ${GRAFANA:-http://localhost:3000}/d/loan-gateway"
+    echo "Трейс:   ${JAEGER:-http://localhost:16686}/search?service=gateway-api&lookback=1h&tags=$TAGS"
     exit 0
   fi
   sleep 1

@@ -18,3 +18,5 @@ jobs:
         run: make lint
       - name: Test
         run: make test
+      - name: Observability configs
+        run: make obs-check

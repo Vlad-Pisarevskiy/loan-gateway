@@ -1,0 +1,36 @@
+# Алерты шлюза (раздел 14.3 спеки). Alertmanager не входит: срабатывания видны в UI Prometheus и Grafana.
+groups:
+  - name: loan-gateway
+    rules:
+      - alert: TargetDown
+        expr: up{job=~"api|worker"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} не отвечает на опрос Prometheus"
+
+      - alert: BankErrorRateHigh
+        expr: |
+          sum by (bank) (rate(loangw_bank_calls_total{outcome=~"retry|failed"}[5m]))
+            / sum by (bank) (rate(loangw_bank_calls_total[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "У {{ $labels.bank }} больше 20 % вызовов заканчиваются ретраем или ошибкой"
+
+      - alert: QueueBacklog
+        expr: max(loangw_queue_oldest_age_seconds) > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Готовая задача ждёт отправки дольше минуты"
+
+      - alert: CallbackTimeouts
+        expr: increase(loangw_sweeper_actions_total{action="callback_timeout"}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Банк не прислал вебхук к дедлайну"
