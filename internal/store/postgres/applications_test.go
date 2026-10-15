@@ -10,6 +10,8 @@ import (
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/application"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/store/postgres"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/store/postgres/pgtest"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry/telemetrytest"
 )
 
 var bankCodes = []string{"westbank", "northbank"} // нарочно не по алфавиту
@@ -102,5 +104,32 @@ func TestGetUnknownReturnsNotFound(t *testing.T) {
 	repo := postgres.NewApplications(pgtest.NewPool(t))
 	if _, err := repo.Get(t.Context(), uuid.Must(uuid.NewV7())); !errors.Is(err, application.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateStoresTraceParent(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	tracer, _ := telemetrytest.Tracer()
+	ctx, span := tracer.Start(t.Context(), "POST /v1/applications")
+	defer span.End()
+	app := newApp()
+	if _, _, err := postgres.NewApplications(pool).Create(ctx, "key-tp", []byte("h"), app, []string{"eastbank", "northbank"}); err != nil {
+		t.Fatal(err)
+	}
+	want := telemetry.TraceParent(ctx)
+	if n := count(t, pool, `SELECT count(*) FROM bank_requests WHERE application_id = $1 AND trace_parent = $2`, app.ID, want); n != 2 {
+		t.Fatalf("requests with trace_parent %q = %d, want 2", want, n)
+	}
+}
+
+func TestCreateWithoutSpanLeavesTraceParentEmpty(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	app := seed(t, pool, "northbank")
+	if n := count(t, pool, `SELECT count(*) FROM bank_requests WHERE application_id = $1 AND trace_parent IS NULL`, app.ID); n != 1 {
+		t.Fatalf("requests without trace_parent = %d, want 1", n)
+	}
+	task := claim(t, postgres.NewQueue(pool), 1)[0]
+	if task.TraceParent != "" {
+		t.Fatalf("TraceParent = %q, want empty for NULL", task.TraceParent)
 	}
 }

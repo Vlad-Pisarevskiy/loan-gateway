@@ -22,7 +22,7 @@ type ApplicationService interface {
 
 // CallbackStore применяет решения из вебхуков; реализация — store/postgres.Queue.
 type CallbackStore interface {
-	ApplyCallback(ctx context.Context, bankCode, externalID string, d application.Decision) (application.CallbackResult, error)
+	ApplyCallback(ctx context.Context, bankCode, externalID string, d application.Decision) (application.CallbackApply, error)
 }
 
 // Pinger проверяет доступность БД; подходит *pgxpool.Pool.

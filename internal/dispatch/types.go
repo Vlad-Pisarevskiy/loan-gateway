@@ -15,7 +15,8 @@ import (
 type Task struct {
 	RequestID   uuid.UUID
 	BankCode    string
-	Attempts    int // номер текущей попытки, уже увеличенный при захвате
+	Attempts    int    // номер текущей попытки, уже увеличенный при захвате
+	TraceParent string // контекст трейса заявки (W3C traceparent); "" — нет
 	Application application.Application
 }
 

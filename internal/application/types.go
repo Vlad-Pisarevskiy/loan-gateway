@@ -112,3 +112,10 @@ const (
 	CallbackDuplicate                           // запрос уже не ждёт вебхук: повтор или опоздание
 	CallbackUnknown                             // запроса с таким external_id нет
 )
+
+// CallbackApply — итог применения вебхука.
+type CallbackApply struct {
+	Result      CallbackResult
+	RequestID   uuid.UUID // id запроса в банк; только для CallbackApplied
+	TraceParent string    // контекст трейса заявки; только для CallbackApplied, "" — не сохранён
+}
