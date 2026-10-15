@@ -17,6 +17,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/application"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/bank"
@@ -24,6 +26,8 @@ import (
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/httpapi"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/store/postgres"
 	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/store/postgres/pgtest"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry"
+	"github.com/Vlad-Pisarevskiy/loan-gateway/internal/telemetry/telemetrytest"
 )
 
 // mockBank описывает банк в e2e-окружении.
@@ -42,10 +46,13 @@ type options struct {
 }
 
 type env struct {
-	t      *testing.T
-	url    string
-	pool   *pgxpool.Pool
-	client *http.Client // клиент к API с таймаутом, чтобы зависший API не держал тест до общего таймаута
+	t             *testing.T
+	url           string
+	pool          *pgxpool.Pool
+	client        *http.Client            // клиент к API с таймаутом, чтобы зависший API не держал тест до общего таймаута
+	spans         *tracetest.SpanRecorder // завершённые спаны API и воркера
+	apiMetrics    *prometheus.Registry    // метрики процесса api
+	workerMetrics *prometheus.Registry    // метрики процесса worker
 }
 
 // start поднимает шлюз (API и воркер) с заглушками банков; всё останавливается в t.Cleanup.
@@ -53,6 +60,9 @@ func start(t *testing.T, o options) *env {
 	t.Helper()
 	pool := pgtest.NewPool(t)
 	log := slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelWarn}))
+	tracer, spans := telemetrytest.Tracer()
+	apiReg, workerReg := telemetry.NewRegistry(), telemetry.NewRegistry()
+	workerMetrics := telemetry.NewMetrics(workerReg)
 
 	// Адрес API нужен заглушкам для вебхуков раньше, чем собран его обработчик.
 	api := httptest.NewUnstartedServer(nil)
@@ -85,10 +95,13 @@ func start(t *testing.T, o options) *env {
 		WebhookBanks:   hooks,
 		WebhookMaxSkew: 5 * time.Minute,
 		Log:            log,
+		Metrics:        telemetry.NewMetrics(apiReg),
+		Tracer:         tracer,
 	})
 	api.Start()
 	t.Cleanup(api.Close)
 
+	workerMetrics.RegisterQueueStats(workerReg, queue.Stats, time.Second)
 	worker := dispatch.New(queue, reg, dispatch.Config{
 		PollInterval:    20 * time.Millisecond,
 		BatchSize:       10,
@@ -101,6 +114,8 @@ func start(t *testing.T, o options) *env {
 		SweepInterval:   50 * time.Millisecond,
 		ShutdownTimeout: 2 * time.Second,
 		BankTimeouts:    timeouts,
+		Metrics:         workerMetrics,
+		Tracer:          tracer,
 	}, log)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -116,7 +131,8 @@ func start(t *testing.T, o options) *env {
 			t.Errorf("worker: %v", runErr)
 		}
 	})
-	return &env{t: t, url: apiURL, pool: pool, client: &http.Client{Timeout: 5 * time.Second}}
+	return &env{t: t, url: apiURL, pool: pool, client: &http.Client{Timeout: 5 * time.Second},
+		spans: spans, apiMetrics: apiReg, workerMetrics: workerReg}
 }
 
 type offerView struct {
