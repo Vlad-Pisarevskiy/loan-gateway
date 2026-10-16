@@ -56,6 +56,7 @@ func New(queue Queue, banks *bank.Registry, cfg Config, log *slog.Logger) *Worke
 	if tracer == nil {
 		tracer = noop.NewTracerProvider().Tracer("")
 	}
+	cfg.Metrics.InitWorkerSeries(banks.Codes())
 	return &Worker{queue: queue, banks: banks, cfg: cfg, log: log, rnd: rand.Int64N, tracer: tracer}
 }
 

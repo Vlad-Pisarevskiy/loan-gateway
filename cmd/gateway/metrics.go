@@ -31,3 +31,8 @@ func startMetrics(addr string, g prometheus.Gatherer) (<-chan error, func(contex
 	}()
 	return errs, srv.Shutdown
 }
+
+// queueStatsTimeout — таймаут чтения gauge очереди из БД при опросе /metrics (раздел 14.2 спеки). Он вдвое
+// меньше таймаута опроса Prometheus (5 с): иначе зависшая БД выглядит как недоступный воркер и с дашборда
+// пропадают все его метрики.
+const queueStatsTimeout = 2 * time.Second

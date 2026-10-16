@@ -154,9 +154,9 @@ func (m *Metrics) Decision(bank string, approved bool, via string) {
 	if m == nil {
 		return
 	}
-	status := "rejected"
+	status := decisionRejected
 	if approved {
-		status = "approved"
+		status = decisionApproved
 	}
 	m.decisions.WithLabelValues(bank, status, via).Inc()
 }
@@ -201,4 +201,48 @@ func (m *Metrics) Swept(callbackTimeouts, requeued, leaseExpired int64) {
 	m.sweeper.WithLabelValues("callback_timeout").Add(float64(callbackTimeouts))
 	m.sweeper.WithLabelValues("requeued").Add(float64(requeued))
 	m.sweeper.WithLabelValues("lease_expired").Add(float64(leaseExpired))
+}
+
+// BankOutcomes — значения метки outcome у loangw_bank_calls_total; совпадают с dispatch.OutcomeKind.String().
+var BankOutcomes = []string{"decision", "accepted", "retry", "failed"}
+
+// Значения метки status у loangw_bank_decisions_total.
+const (
+	decisionApproved = "approved"
+	decisionRejected = "rejected"
+)
+
+// decisionStatuses — все значения метки status у loangw_bank_decisions_total.
+var decisionStatuses = []string{decisionApproved, decisionRejected}
+
+// InitWorkerSeries создаёт с нулём серии воркера по банкам banks: серия счётчика иначе появляется
+// при первом событии, и rate()/increase() это событие не видят (раздел 14.2 спеки).
+func (m *Metrics) InitWorkerSeries(banks []string) {
+	if m == nil {
+		return
+	}
+	for _, b := range banks {
+		for _, o := range BankOutcomes {
+			m.bankCalls.WithLabelValues(b, o)
+		}
+		for _, s := range decisionStatuses {
+			m.decisions.WithLabelValues(b, s, ViaSync)
+		}
+	}
+}
+
+// InitAPISeries — то же для api: вебхуки и решения по вебхукам асинхронных банков webhookBanks.
+func (m *Metrics) InitAPISeries(webhookBanks []string) {
+	if m == nil {
+		return
+	}
+	for _, b := range webhookBanks {
+		for _, r := range []string{WebhookApplied, WebhookDuplicate, WebhookUnknown, WebhookUnauthorized, WebhookBadBody, WebhookError} {
+			m.webhooks.WithLabelValues(b, r)
+		}
+		for _, s := range decisionStatuses {
+			m.decisions.WithLabelValues(b, s, ViaWebhook)
+		}
+	}
+	m.webhooks.WithLabelValues(Other, WebhookUnknownBank)
 }

@@ -5,6 +5,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -42,5 +45,24 @@ func TestStartMetricsReportsBusyPort(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("busy METRICS_ADDR is not reported")
+	}
+}
+
+// TestQueueStatsTimeoutFitsScrape: gauge очереди читаются из БД при опросе /metrics; их таймаут должен
+// оставлять запас до таймаута опроса Prometheus, иначе зависшая БД выглядит как недоступный воркер.
+func TestQueueStatsTimeoutFitsScrape(t *testing.T) {
+	cfg, err := os.ReadFile("../../deploy/observability/prometheus.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := regexp.MustCompile(`(?m)^\s*scrape_(?:interval|timeout):\s*(\d+)s\s*$`).FindAllStringSubmatch(string(cfg), -1)
+	if len(limits) == 0 {
+		t.Fatal("prometheus.yml sets no scrape_interval in seconds")
+	}
+	for _, l := range limits {
+		n, _ := strconv.Atoi(l[1])
+		if limit := time.Duration(n) * time.Second; 2*queueStatsTimeout > limit {
+			t.Errorf("queue stats timeout %v leaves no margin within scrape limit %v", queueStatsTimeout, limit)
+		}
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -228,5 +230,15 @@ func TestDuplicateWebhookAddsNoCallbackSpan(t *testing.T) {
 	do(h, http.MethodPost, westPath, body, signedAt(webhookNow, body))
 	if spans := telemetrytest.Spans(rec, "bank_request.callback"); len(spans) != 0 {
 		t.Fatalf("callback spans = %d, want 0 for a duplicate", len(spans))
+	}
+}
+
+// TestAPICreatesWebhookSeriesAtStart: серии вебхуков асинхронных банков видны до первого запроса.
+func TestAPICreatesWebhookSeriesAtStart(t *testing.T) {
+	_, reg, _ := newObservedHandler(t, &fakeService{}, &fakeCallbacks{})
+	rec := httptest.NewRecorder()
+	telemetry.Handler(reg).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if want := `loangw_webhooks_total{bank="westbank",result="applied"} 0`; !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("exposition has no %q", want)
 	}
 }
